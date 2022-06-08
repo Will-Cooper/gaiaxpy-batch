@@ -5,15 +5,19 @@ import numpy as np
 
 
 class PasswordPromptAction(argparse.Action):
+    """
+    Taken from https://stackoverflow.com/questions/27921629/python-using-getpass-with-argparse
+    For prompting a hidden password
+    """
     def __init__(self,
                  option_strings,
                  dest=None,
                  nargs=0,
                  default=None,
                  required=False,
-                 type=None,
+                 type=None,  # if you're looking why this shadows outerscope, blame argparse
                  metavar=None,
-                 help=None):
+                 help=None):  # if you're looking why this shadows outerscope, blame argparse
         super(PasswordPromptAction, self).__init__(
             option_strings=option_strings,
             dest=dest,
@@ -35,7 +39,7 @@ def sysargs():
     Returns
     -------
     _args
-        The different argument parameters, can be grabbed via their long names (e.g. _args.host)
+        The different argument parameters, can be grabbed via their long names (e.g. _args.filename)
     """
     _args = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     _args.add_argument('-f', dest='filename', required=True, type=str, metavar='Filename',
@@ -61,6 +65,18 @@ def sysargs():
     return _args
 
 
-def str2arr(s):
-    return np.fromiter(s[1:-1].replace('\n', '').split('  '), float)
+def str2arr(s: str):
+    """
+    Convenience function for converting weird format of the flux/ error cells in dataframe
 
+    Parameters
+    ----------
+    s: str
+        What should be an array of floats, being interpreted as a string
+
+    Returns
+    -------
+    _: np.ndarray
+        Array of floats as parsed from string
+    """
+    return np.fromiter(s[1:-1].replace('\n', '').split('  '), float)

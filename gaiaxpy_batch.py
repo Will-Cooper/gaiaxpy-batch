@@ -4,7 +4,7 @@ import multiprocessing as mp
 import os
 from re import search
 import time
-from typing import Optional
+from typing import Optional, List
 
 from astropy.table import Table
 from gaiaxpy import calibrate
@@ -14,17 +14,31 @@ from tqdm import tqdm
 from utils import *
 
 
-def calibrate_wrap(idlist: list, **kwargs) -> Optional[pd.DataFrame]:
+def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
+    """
+    Wraps the GaiaXPy calibrate function with a list of source IDs
+
+    Parameters
+    ----------
+    idlist: List[int]
+        List of Gaia DR3 Source IDs
+    kwargs
+        Containing sampling information, truncation switch, username and password information
+
+    Returns
+    -------
+    _: pd.DataFrame
+    """
     i = kwargs.get('i', None)
     sampling = kwargs.get('sampling', None)
     truncate = kwargs.get('truncate', False)
     username = kwargs.get('username', None)
     password = kwargs.get('password', None)
     try:
-        procnum = search('\d+', mp.current_process().name).group()
+        procnum = search('\d+', mp.current_process().name).group()  # get process number if multiprocessing
     except AttributeError:
         procnum = i
-    time.sleep(0.01 * int(procnum))
+    time.sleep(0.01 * int(procnum))  # sleep thread for few ms as underlying temp files are named using time
     try:
         return calibrate(idlist, sampling=sampling, truncation=truncate, save_file=False,
                          username=username, password=password)[0]
@@ -33,17 +47,34 @@ def calibrate_wrap(idlist: list, **kwargs) -> Optional[pd.DataFrame]:
         return None
 
 
-def allcalib(xpids: list, nearest: int, **kwargs) -> Optional[pd.DataFrame]:
-    cpucount = mp.cpu_count() - 1 or 1
-    chunksize = int(nearest * np.ceil(len(xpids) // cpucount / nearest))
-    if chunksize < cpucount:
+def allcalib(xpids: List[int], nearest: int, **kwargs) -> Optional[pd.DataFrame]:
+    """
+    Depending on number of source IDs, will either thread in multiprocess pool or serialise
+
+    Parameters
+    ----------
+    xpids: List[int]
+        List of Gaia DR3 Source IDs
+    nearest: int
+        The nearest order of magnitude to try and chunk the list up by
+    kwargs
+        To be passed to the calibrate function
+
+    Returns
+    -------
+    stackdf
+        The combined dataframes from each thread having run through calibrate
+    """
+    cpucount = mp.cpu_count() - 1 or 1  # always leave a core free
+    chunksize = int(nearest * np.ceil(len(xpids) // cpucount / nearest))  # size of each chunk to nearest order mag
+    if chunksize < cpucount:  # serialise if not many sources
         res = [calibrate_wrap([xid, ], i=i, **kwargs) for i, xid in enumerate(xpids)]
     else:
-        xchunk = [xpids[i:i+chunksize] for i in range(0, len(xpids), chunksize)]
+        xchunk = [xpids[i:i+chunksize] for i in range(0, len(xpids), chunksize)]  # chunk up the list of IDs
         print(f'Chunksize {chunksize} for {len(xchunk)} threads')
-        with mp.Pool() as pool:
+        with mp.Pool() as pool:  # wrap into a process pool
             res = pool.map(partial(calibrate_wrap, **kwargs), xchunk)
-    res = [caldf for caldf in res if caldf is not None]
+    res = [caldf for caldf in res if caldf is not None]  # make a list of the successful calibrations
     if len(res):
         stackdf = pd.concat(res, ignore_index=True)
         return stackdf
@@ -51,10 +82,26 @@ def allcalib(xpids: list, nearest: int, **kwargs) -> Optional[pd.DataFrame]:
 
 
 def download_xp(fname: str, **kwargs):
+    """
+    Iterative process for downloading XP spectra
+
+    Parameters
+    ----------
+    fname: str
+        The input csv name
+    kwargs
+        Contains the name of the source ID column plus kwargs to be passed to the calibrate function
+
+    Returns
+    -------
+    combdf
+        The full csv as given, with newly added flux and fluxerror columns
+    """
     idcolname = kwargs.get('idcolname', 'source_id')
     # downloaded from archive
     df = pd.read_csv(fname)
     xpidsstart = df[idcolname].values.tolist()
+
     # checking in steps of nearest 1000
     stackall = allcalib(xpidsstart, 1000, **kwargs)
     combdf = pd.merge(df, stackall, left_on=idcolname,
@@ -62,6 +109,7 @@ def download_xp(fname: str, **kwargs):
     if not len(combdf):
         raise ValueError('All batches failed')
     xpidsfail1000 = combdf.source_id[combdf.flux.isna()].values.tolist()
+
     if len(xpidsfail1000) > 1000:
         # checking in steps of nearest 100
         stackdf100 = allcalib(xpidsfail1000, 100, **kwargs)
@@ -71,6 +119,7 @@ def download_xp(fname: str, **kwargs):
         xpidsfail100 = combdf.source_id[combdf.flux.isna()].values.tolist()
     else:
         xpidsfail100 = xpidsfail1000
+
     if len(xpidsfail100) > 100:
         # checking in steps of nearest 10
         stackdf10 = allcalib(xpidsfail100, 10, **kwargs)
@@ -80,7 +129,9 @@ def download_xp(fname: str, **kwargs):
         xpidsfail10 = combdf.source_id[combdf.flux.isna()].values.tolist()
     else:
         xpidsfail10 = xpidsfail100
+
     if len(xpidsfail10):
+        # checking each object indivudally
         stackdf1 = allcalib(xpidsfail10, 1, **kwargs)
         stackall = pd.concat([stackall, stackdf1], ignore_index=True)
     combdf = pd.merge(df, stackall, left_on=idcolname,
@@ -89,20 +140,37 @@ def download_xp(fname: str, **kwargs):
 
 
 def save(df: pd.DataFrame, fname: str, **kwargs):
+    """
+    Saves the found XP spectra, always to two csvs (full and cut - to those with spectra only)
+
+    Parameters
+    ----------
+    df: pd.DataFrame
+        The input csv
+    fname: str
+        The input csv name
+    kwargs
+        Contains the name of the source ID column plus name of object name column (e.g. shortname)
+        and the outputstyle (fits or txt)
+    """
     outputstyle = kwargs.get('outputstyle', None)
     idcolname = kwargs.get('idcolname', 'source_id')
     fnameout = fname.replace('.csv', '_XP_spectra.csv')
     fnamecut = fnameout.replace('.csv', '_cut.csv')
     fpath = os.path.dirname(os.path.abspath(fname)) + '/outputspectra/'
     namecol = kwargs.get('namecol', idcolname)
-    dfcut = df.dropna(subset=['flux', ])
+
+    # saving to files
+    dfcut = df.dropna(subset=['flux', ])  # drop null rows to make cut table
     df.to_csv(fnameout, index=False)
     dfcut.to_csv(fnamecut, index=False)
+
     if outputstyle is None or outputstyle not in ('fits', 'txt'):
         return
     dfcutgrp = dfcut.groupby(namecol)
     dfcutgrplen = dfcut[namecol].nunique()
-    wave: np.ndarray = kwargs.get('sampling', np.arange(336., 1201., 2.))
+    wave: np.ndarray = kwargs.get('sampling', np.arange(336., 1201., 2.))  # default arange from help pages
+    # https://gaia-dpci.github.io/GaiaXPy-website/tutorials/Calibrator%20tutorial.html
     if not os.path.exists(fpath):
         os.mkdir(fpath)
     for i, (objname, objgrp) in tqdm(enumerate(dfcutgrp), total=dfcutgrplen, desc='Saving spectra as txt'):
@@ -122,12 +190,27 @@ def save(df: pd.DataFrame, fname: str, **kwargs):
 
 
 def batch(fname: str, **kwargs):
+    """
+    Batch function to either be run through main, or imported
+
+    Parameters
+    ----------
+    fname: str
+        The input csv name
+    kwargs
+        Keyword arguments for the calibrate function plus column names and output styling
+    """
+    if not fname.endswith('.csv'):
+        raise ValueError('Input file must be a csv')
     combdf = download_xp(fname, **kwargs)
     save(combdf, fname, **kwargs)
     return
 
 
 def main():
+    """
+    Main function, runs only when file run from command line using system arguments
+    """
     args = sysargs()
     fname = args.filename
     kwargs = dict(sampling=args.sampling, username=args.username, password=args.password, truncate=args.truncate,
