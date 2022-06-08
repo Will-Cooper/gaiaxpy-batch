@@ -38,24 +38,26 @@ def sysargs():
         The different argument parameters, can be grabbed via their long names (e.g. _args.host)
     """
     _args = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    _args.add_argument('-f', dest='filename', required=True, type=str,
+    _args.add_argument('-f', dest='filename', required=True, type=str, metavar='Filename',
                        help='Input CSV file containing the Gaia DR3 Source IDs')
-    _args.add_argument('-s', dest='sampling', default=None, type=str,
-                       help='Wavelength [absolute nm] sampling to be retrieved, e.g. "np.linspace(600, 1050, 120)"')
-    _args.add_argument('-u', dest='username', default=None, type=str,
+    _args.add_argument('-s', dest='sampling', default=None, type=str, nargs=4,
+                       metavar=('numpy function', 'start', 'end', 'step'),
+                       help='Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"')
+    _args.add_argument('-u', dest='username', default=None, type=str, metavar='Cosmos username',
                        help='Username on Gaia Archive')
     _args.add_argument('-p', dest='password', action=PasswordPromptAction, default=None, type=str,
-                       help='Password on Gaia Archive')
+                       help='Prompt Password on Gaia Archive')
     _args.add_argument('-t', dest='truncate', help='Truncate set of bases?', default=False, action='store_true')
     _args.add_argument('-o', dest='outputstyle', help='Output of produced spectra', choices=('fits', 'txt'),
                        default=None)
     _args.add_argument('-i', dest='idcolname', help='Name of the column relating to DR3 Source ID',
-                       default='source_id')
-    _args.add_argument('-n', dest='namecol', default='source_id',
+                       default='source_id', metavar='Source ID column name')
+    _args.add_argument('-n', dest='namecol', default='source_id', metavar='Object name column name',
                        help='Name of the column relating to the object name (for saving spectra)')
     _args = _args.parse_args()
     if _args.sampling is not None:
-        exec('_args.sampling = ' + str(_args.sampling))
+        exec(f'_args.sampling = '
+             f'np.{_args.sampling[0]}({_args.sampling[1]}, {_args.sampling[2]}, {_args.sampling[3]})')
     return _args
 
 

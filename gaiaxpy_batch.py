@@ -50,7 +50,8 @@ def allcalib(xpids: list, nearest: int, **kwargs) -> Optional[pd.DataFrame]:
     return None
 
 
-def download_xp(fname: str, idcolname: str, **kwargs):
+def download_xp(fname: str, **kwargs):
+    idcolname = kwargs.get('idcolname', 'source_id')
     # downloaded from archive
     df = pd.read_csv(fname)
     xpidsstart = df[idcolname].values.tolist()
@@ -87,7 +88,9 @@ def download_xp(fname: str, idcolname: str, **kwargs):
     return combdf
 
 
-def save(df: pd.DataFrame, fname: str, outputstyle: str, idcolname: str, **kwargs):
+def save(df: pd.DataFrame, fname: str, **kwargs):
+    outputstyle = kwargs.get('outputstyle', None)
+    idcolname = kwargs.get('idcolname', 'source_id')
     fnameout = fname.replace('.csv', '_XP_spectra.csv')
     fnamecut = fnameout.replace('.csv', '_cut.csv')
     fpath = os.path.dirname(os.path.abspath(fname)) + '/outputspectra/'
@@ -119,10 +122,8 @@ def save(df: pd.DataFrame, fname: str, outputstyle: str, idcolname: str, **kwarg
 
 
 def batch(fname: str, **kwargs):
-    outputstyle = kwargs.get('outputstyle', None)
-    idcolname = kwargs.get('idcolname', 'source_id')
-    combdf = download_xp(fname, idcolname, **kwargs)
-    save(combdf, fname, outputstyle, idcolname, **kwargs)
+    combdf = download_xp(fname, **kwargs)
+    save(combdf, fname, **kwargs)
     return
 
 
