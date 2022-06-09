@@ -92,5 +92,4 @@ the [documentation page](https://gaiaxpy.readthedocs.io/en/latest/cite.html). Th
 is:  
 Daniela Ruz-Mieres. (2022). gaia-dpci/GaiaXPy: GaiaXPy 1.0.2 (1.0.2). Zenodo. https://doi.org/10.5281/zenodo.6569912  
 
-If you use the software from this repo, please use the 
-zenodo link on the right.
+If you use the software from this repo, please use this zenodo badge:  [![DOI](https://zenodo.org/badge/501233453.svg)](https://zenodo.org/badge/latestdoi/501233453)
