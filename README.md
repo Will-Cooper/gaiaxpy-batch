@@ -29,6 +29,27 @@ The filename is the only required input but most recent
 testing showed that Cosmos username & password are also
 required.
 
+### Example
+When calling from the command line:
+```bash
+python gaiaxpy_batch.py -f mysourceids.csv -s linspace 600 1050 120 -u wcooper -p -t -o fits -i source_id -n shortname
+```
+where `mysourceids.csv` looks like:
+```csv
+source_id, shortname
+1, alice
+2, bob
+3, charles
+...
+```
+### Other Example
+When importing the package within python:
+```python
+from gaiaxpy_batch import batch
+kwargs = dict(sampling=np.linspace(600, 1050, 120), truncate=False, outputstyle=None)
+batch('mysourceids.csv', **kwargs)
+```
+
 ### `calibrate`
 For more information on the `gaiaxpy.calibrate` function,
 read [the tutorial](https://gaia-dpci.github.io/GaiaXPy-website/tutorials/Calibrator%20tutorial.html).
