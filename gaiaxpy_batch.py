@@ -1,4 +1,7 @@
 # coding: utf-8
+from contextlib import redirect_stdout
+from io import StringIO
+import logging
 from functools import partial
 import multiprocessing as mp
 import os
@@ -23,7 +26,7 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
     idlist: List[int]
         List of Gaia DR3 Source IDs
     kwargs
-        Containing sampling information, truncation switch, username and password information
+        Containing sampling information, truncation switch, verbosity switch, username and password information
 
     Returns
     -------
@@ -69,11 +72,13 @@ def allcalib(xpids: List[int], nearest: int, **kwargs) -> Optional[pd.DataFrame]
     """
     cpucount = mp.cpu_count() - 1 or 1  # always leave a core free
     chunksize = int(nearest * np.ceil(len(xpids) // cpucount / nearest))  # size of each chunk to nearest order mag
+    verbose = kwargs.get('verbose', False)
     if chunksize < cpucount:  # serialise if not many sources
         res = [calibrate_wrap([xid, ], i=i, **kwargs) for i, xid in enumerate(xpids)]
     else:
         xchunk = [xpids[i:i+chunksize] for i in range(0, len(xpids), chunksize)]  # chunk up the list of IDs
-        print(f'Chunksize {chunksize} for {len(xchunk)} threads')
+        if verbose:
+            print(f'Chunksize {chunksize} for {len(xchunk)} threads')
         with mp.Pool() as pool:  # wrap into a process pool
             res = pool.map(partial(calibrate_wrap, **kwargs), xchunk)
     res = [caldf for caldf in res if caldf is not None]  # make a list of the successful calibrations
@@ -99,45 +104,51 @@ def download_xp(fname: str, **kwargs):
     combdf
         The full csv as given, with newly added flux and fluxerror columns
     """
-    idcolname = kwargs.get('idcolname', 'source_id')
-    # downloaded from archive
-    df = pd.read_csv(fname)
-    xpidsstart = df[idcolname].values.tolist()
+    with tqdm(total=100, desc='Calibrating in steps') as pbar:
+        idcolname = kwargs.get('idcolname', 'source_id')
+        # downloaded from archive
+        df = pd.read_csv(fname)
+        xpidsstart = df[idcolname].values.tolist()
+        pbar.update(20)
 
-    # checking in steps of nearest 1000
-    stackall = allcalib(xpidsstart, 1000, **kwargs)
-    combdf = pd.merge(df, stackall, left_on=idcolname,
-                      right_on='source_id', how='left') if stackall is not None else pd.DataFrame()
-    if not len(combdf):
-        raise ValueError('All batches failed')
-    xpidsfail1000 = combdf[idcolname][combdf.flux.isna()].values.tolist()
+        # checking in steps of nearest 1000
+        stackall = allcalib(xpidsstart, 1000, **kwargs)
+        combdf = pd.merge(df, stackall, left_on=idcolname,
+                          right_on='source_id', how='left') if stackall is not None else pd.DataFrame()
+        if not len(combdf):
+            raise ValueError('All batches failed')
+        xpidsfail1000 = combdf[idcolname][combdf.flux.isna()].values.tolist()
+        pbar.update(20)
 
-    if len(xpidsfail1000) > 1000:
-        # checking in steps of nearest 100
-        stackdf100 = allcalib(xpidsfail1000, 100, **kwargs)
-        stackall = pd.concat([stackall, stackdf100], ignore_index=True)
+        if len(xpidsfail1000) > 1000:
+            # checking in steps of nearest 100
+            stackdf100 = allcalib(xpidsfail1000, 100, **kwargs)
+            stackall = pd.concat([stackall, stackdf100], ignore_index=True)
+            combdf = pd.merge(df, stackall, left_on=idcolname,
+                              right_on='source_id', how='left') if stackall is not None else combdf
+            xpidsfail100 = combdf[idcolname][combdf.flux.isna()].values.tolist()
+        else:
+            xpidsfail100 = xpidsfail1000
+        pbar.update(20)
+
+        if len(xpidsfail100) > 100:
+            # checking in steps of nearest 10
+            stackdf10 = allcalib(xpidsfail100, 10, **kwargs)
+            stackall = pd.concat([stackall, stackdf10], ignore_index=True)
+            combdf = pd.merge(df, stackall, left_on=idcolname,
+                              right_on='source_id', how='left') if stackall is not None else combdf
+            xpidsfail10 = combdf[idcolname][combdf.flux.isna()].values.tolist()
+        else:
+            xpidsfail10 = xpidsfail100
+        pbar.update(20)
+
+        if len(xpidsfail10):
+            # checking each object indivudally
+            stackdf1 = allcalib(xpidsfail10, 1, **kwargs)
+            stackall = pd.concat([stackall, stackdf1], ignore_index=True)
         combdf = pd.merge(df, stackall, left_on=idcolname,
                           right_on='source_id', how='left') if stackall is not None else combdf
-        xpidsfail100 = combdf[idcolname][combdf.flux.isna()].values.tolist()
-    else:
-        xpidsfail100 = xpidsfail1000
-
-    if len(xpidsfail100) > 100:
-        # checking in steps of nearest 10
-        stackdf10 = allcalib(xpidsfail100, 10, **kwargs)
-        stackall = pd.concat([stackall, stackdf10], ignore_index=True)
-        combdf = pd.merge(df, stackall, left_on=idcolname,
-                          right_on='source_id', how='left') if stackall is not None else combdf
-        xpidsfail10 = combdf[idcolname][combdf.flux.isna()].values.tolist()
-    else:
-        xpidsfail10 = xpidsfail100
-
-    if len(xpidsfail10):
-        # checking each object indivudally
-        stackdf1 = allcalib(xpidsfail10, 1, **kwargs)
-        stackall = pd.concat([stackall, stackdf1], ignore_index=True)
-    combdf = pd.merge(df, stackall, left_on=idcolname,
-                      right_on='source_id', how='left') if stackall is not None else combdf
+        pbar.update(20)
     return combdf
 
 
@@ -216,8 +227,16 @@ def main():
     args = sysargs()
     fname = args.filename
     kwargs = dict(sampling=args.sampling, username=args.username, password=args.password, truncate=args.truncate,
-                  outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol)
-    batch(fname, **kwargs)
+                  outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol, verbose=args.verbose)
+    loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+    if args.verbose:
+        [logger.setLevel('INFO') for logger in loggers]
+        batch(fname, **kwargs)
+    else:
+        fio = StringIO()
+        [logger.setLevel('ERROR') for logger in loggers]
+        with redirect_stdout(fio):
+            batch(fname, **kwargs)
     return
 
 

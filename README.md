@@ -16,6 +16,7 @@ To keep updated:
 git pull
 ```
 ### Set-up:
+#### Conda
 The best way of setting up a clean environment with this
 package & `gaiaxpy` is to use `conda`.
 ```bash
@@ -23,6 +24,7 @@ conda env create -f environment.yml
 conda activate gaiaxpy-batch
 conda deactivate # to leave environment
 ```
+#### Venv (pip)
 Alternatively, to create a `pip` environment:
 ```bash
 # if venv isn't installed:
@@ -37,32 +39,41 @@ deactivate  # to leave
 Pass the `gaiaxpy_batch` a **csv** containing DR3
 source IDs as discussed in the usage below:
 ```
-usage: gaiaxpy_batch.py [-h] -f Filename [-s numpy function start end step] [-u Cosmos username] [-p] [-t] [-o {fits,txt}] [-i Source ID column name]
-                        [-n Object name column name]
+usage: gaiaxpy_batch.py [-h] -f Filename -u Cosmos username -p [-s numpy function start end step] [-t] [-o {fits,txt}] [-i Source ID column name]
+                        [-n Object name column name] [-v]
 
 optional arguments:
   -h, --help            show this help message and exit
   -f Filename           Input CSV file containing the Gaia DR3 Source IDs
-  -s numpy function start end step
-                        Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"
   -u Cosmos username    Username on Gaia Archive
   -p                    Prompt Password on Gaia Archive
+  -s numpy function start end step
+                        Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"
   -t                    Truncate set of bases?
   -o {fits,txt}         Output of produced spectra
   -i Source ID column name
                         Name of the column relating to DR3 Source ID
   -n Object name column name
                         Name of the column relating to the object name (for saving spectra)
+  -v                    Print failure errors?
 
 ```
-The filename is the only required input but most recent
-testing showed that Cosmos username & password are also
-required.
+The filename, username and password are the only required inputs
+(password will be prompted for, don't type it on the command line). 
+We require a username & password as that allows less restrictive
+access to the Gaia archive, c.f. 
+[FAQ](https://www.cosmos.esa.int/web/gaia-users/archive/faq#account-limits-2020).
 
-### Example
+### Examples
 When calling from the command line:
+#### Minimum Example
 ```bash
-python gaiaxpy_batch.py -f mysourceids.csv -s linspace 600 1050 120 -u wcooper -p -t -o fits -i source_id -n shortname
+python gaiaxpy_batch.py -f mysourceids.csv -u <username> -p
+```
+
+#### Expanded example
+```bash
+python gaiaxpy_batch.py -f mysourceids.csv -u <username> -p -s linspace 600 1050 120 -t -o fits -i source_id -n shortname
 ```
 where `mysourceids.csv` looks like:
 ```csv
@@ -72,9 +83,10 @@ source_id, shortname
 3, charles
 ...
 ```
-### Other Example
+#### Python example
 When importing the package within python:
 ```python
+import numpy as np
 from gaiaxpy_batch import batch
 kwargs = dict(sampling=np.linspace(600, 1050, 120), truncate=False, outputstyle=None)
 batch('mysourceids.csv', **kwargs)
@@ -90,6 +102,8 @@ Additionally, the documentation can be found
 Please cite `gaiaxpy` following the instructions on
 the [documentation page](https://gaiaxpy.readthedocs.io/en/latest/cite.html). The version of that code used here
 is:  
-Daniela Ruz-Mieres. (2022). gaia-dpci/GaiaXPy: GaiaXPy 1.0.2 (1.0.2). Zenodo. https://doi.org/10.5281/zenodo.6569912  
+Daniela Ruz-Mieres. (2022). gaia-dpci/GaiaXPy: GaiaXPy 1.1.0 (1.1.0). Zenodo. https://doi.org/10.5281/zenodo.6624491  
 
-If you use the software from this repo, please use this zenodo badge:  [![DOI](https://zenodo.org/badge/501233453.svg)](https://zenodo.org/badge/latestdoi/501233453)
+If you use the software from this repo, please cite
+the latest version through this zenodo badge:
+[![DOI](https://zenodo.org/badge/501233453.svg)](https://zenodo.org/badge/latestdoi/501233453)
