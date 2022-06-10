@@ -55,7 +55,7 @@ optional arguments:
                         Name of the column relating to DR3 Source ID
   -n Object name column name
                         Name of the column relating to the object name (for saving spectra)
-  -v                    Print failure errors?
+  -v                    Verbose output?
 
 ```
 The filename, username and password are the only required inputs
