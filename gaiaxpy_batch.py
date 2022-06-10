@@ -34,6 +34,7 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
     truncate = kwargs.get('truncate', False)
     username = kwargs.get('username', None)
     password = kwargs.get('password', None)
+    verbose = kwargs.get('verbose', False)
     try:
         procnum = search('\d+', mp.current_process().name).group()  # get process number if multiprocessing
     except AttributeError:
@@ -43,7 +44,8 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
         return calibrate(idlist, sampling=sampling, truncation=truncate, save_file=False,
                          username=username, password=password)[0]
     except (BaseException, TypeError, IndexError) as e:
-        print(repr(e))
+        if verbose:
+            print(repr(e))
         return None
 
 
@@ -108,7 +110,7 @@ def download_xp(fname: str, **kwargs):
                       right_on='source_id', how='left') if stackall is not None else pd.DataFrame()
     if not len(combdf):
         raise ValueError('All batches failed')
-    xpidsfail1000 = combdf.source_id[combdf.flux.isna()].values.tolist()
+    xpidsfail1000 = combdf[idcolname][combdf.flux.isna()].values.tolist()
 
     if len(xpidsfail1000) > 1000:
         # checking in steps of nearest 100
@@ -116,7 +118,7 @@ def download_xp(fname: str, **kwargs):
         stackall = pd.concat([stackall, stackdf100], ignore_index=True)
         combdf = pd.merge(df, stackall, left_on=idcolname,
                           right_on='source_id', how='left') if stackall is not None else combdf
-        xpidsfail100 = combdf.source_id[combdf.flux.isna()].values.tolist()
+        xpidsfail100 = combdf[idcolname][combdf.flux.isna()].values.tolist()
     else:
         xpidsfail100 = xpidsfail1000
 
@@ -126,7 +128,7 @@ def download_xp(fname: str, **kwargs):
         stackall = pd.concat([stackall, stackdf10], ignore_index=True)
         combdf = pd.merge(df, stackall, left_on=idcolname,
                           right_on='source_id', how='left') if stackall is not None else combdf
-        xpidsfail10 = combdf.source_id[combdf.flux.isna()].values.tolist()
+        xpidsfail10 = combdf[idcolname][combdf.flux.isna()].values.tolist()
     else:
         xpidsfail10 = xpidsfail100
 
@@ -173,19 +175,19 @@ def save(df: pd.DataFrame, fname: str, **kwargs):
     # https://gaia-dpci.github.io/GaiaXPy-website/tutorials/Calibrator%20tutorial.html
     if not os.path.exists(fpath):
         os.mkdir(fpath)
-    for i, (objname, objgrp) in tqdm(enumerate(dfcutgrp), total=dfcutgrplen, desc='Saving spectra as txt'):
+    for i, (objname, objgrp) in tqdm(enumerate(dfcutgrp), total=dfcutgrplen, desc='Saving spectra to files'):
         if namecol == idcolname:
             objname = 'GaiaDR3_' + objname
         objpath = fpath + str(objname)
         row = objgrp.iloc[0]
-        flux = str2arr(row.flux)
-        fluxerr = str2arr(row.error)
+        flux = row.flux
+        fluxerr = row.flux_error
         arr = np.array((wave, flux, fluxerr)).T
         if outputstyle == 'txt':
             np.savetxt(objpath + '.txt', arr)
         elif outputstyle == 'fits':
             t = Table(arr, names=('wave', 'flux', 'fluxerror'))
-            t.write(objpath + 'fits', overwrite=True)
+            t.write(objpath + '.fits', overwrite=True)
     return
 
 

@@ -58,6 +58,7 @@ def sysargs():
                        default='source_id', metavar='Source ID column name')
     _args.add_argument('-n', dest='namecol', default='source_id', metavar='Object name column name',
                        help='Name of the column relating to the object name (for saving spectra)')
+    _args.add_argument('-v', dest='verbose', default=False, action='store_true', help='Print failure errors?')
     _args = _args.parse_args()
     if _args.sampling is not None:
         exec(f'_args.sampling = '
