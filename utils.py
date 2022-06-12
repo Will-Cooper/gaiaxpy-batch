@@ -65,9 +65,9 @@ def sysargs():
     return _args
 
 
-def str2arr(s: str):
+def str2float(s: str):
     """
-    Convenience function for converting weird format of the flux/ error cells in dataframe
+    Convenience function for converting weird format of the flux/ error cells which sometimes occurs in dataframe
 
     Parameters
     ----------
@@ -79,4 +79,4 @@ def str2arr(s: str):
     _: np.ndarray
         Array of floats as parsed from string
     """
-    return np.fromiter(s[1:-1].replace('\n', '').split('  '), float)
+    return np.fromiter(filter(None, s[1:-1].replace('\n', '').split(' ')), float)
