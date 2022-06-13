@@ -70,7 +70,7 @@ dependencies:
     - cycler==0.11.0
     - fastavro==1.4.7
     - fonttools==4.33.3
-    - gaiaxpy==1.1.0
+    - gaiaxpy==1.1.1
     - html5lib==1.1
     - idna==3.3
     - importlib-metadata==4.11.4

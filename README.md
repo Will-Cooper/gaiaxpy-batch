@@ -102,7 +102,7 @@ Additionally, the documentation can be found
 Please cite `gaiaxpy` following the instructions on
 the [documentation page](https://gaiaxpy.readthedocs.io/en/latest/cite.html). The version of that code used here
 is:  
-Daniela Ruz-Mieres. (2022). gaia-dpci/GaiaXPy: GaiaXPy 1.1.0 (1.1.0). Zenodo. https://doi.org/10.5281/zenodo.6624491  
+Daniela Ruz-Mieres. (2022). gaia-dpci/GaiaXPy: GaiaXPy 1.1.1 (1.1.1). Zenodo. https://doi.org/10.5281/zenodo.6637762  
 
 If you use the software from this repo, please cite
 the latest version through this zenodo badge:
