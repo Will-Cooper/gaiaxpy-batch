@@ -68,9 +68,9 @@ dependencies:
     - charset-normalizer==2.0.12
     - cryptography==37.0.2
     - cycler==0.11.0
-    - fastavro==1.5.0
+    - fastavro==1.4.7
     - fonttools==4.33.3
-    - gaiaxpy==1.0.2
+    - gaiaxpy==1.1.0
     - html5lib==1.1
     - idna==3.3
     - importlib-metadata==4.11.4

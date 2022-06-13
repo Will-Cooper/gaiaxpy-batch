@@ -44,13 +44,13 @@ def sysargs():
     _args = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     _args.add_argument('-f', dest='filename', required=True, type=str, metavar='Filename',
                        help='Input CSV file containing the Gaia DR3 Source IDs')
+    _args.add_argument('-u', dest='username', type=str, metavar='Cosmos username', required=True,
+                       help='Username on Gaia Archive')
+    _args.add_argument('-p', dest='password', action=PasswordPromptAction, type=str,
+                       help='Prompt Password on Gaia Archive', required=True)
     _args.add_argument('-s', dest='sampling', default=None, type=str, nargs=4,
                        metavar=('numpy function', 'start', 'end', 'step'),
                        help='Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"')
-    _args.add_argument('-u', dest='username', default=None, type=str, metavar='Cosmos username',
-                       help='Username on Gaia Archive')
-    _args.add_argument('-p', dest='password', action=PasswordPromptAction, default=None, type=str,
-                       help='Prompt Password on Gaia Archive')
     _args.add_argument('-t', dest='truncate', help='Truncate set of bases?', default=False, action='store_true')
     _args.add_argument('-o', dest='outputstyle', help='Output of produced spectra', choices=('fits', 'txt'),
                        default=None)
@@ -58,6 +58,7 @@ def sysargs():
                        default='source_id', metavar='Source ID column name')
     _args.add_argument('-n', dest='namecol', default='source_id', metavar='Object name column name',
                        help='Name of the column relating to the object name (for saving spectra)')
+    _args.add_argument('-v', dest='verbose', default=False, action='store_true', help='Print failure errors?')
     _args = _args.parse_args()
     if _args.sampling is not None:
         exec(f'_args.sampling = '

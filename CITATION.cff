@@ -5,6 +5,6 @@ authors:
   given-names: "W. J."
   orcid: "https://orcid.org/0000-0003-3501-8967"
 title: "gaiaxpy-batch"
-version: 1.0.1-beta
-date-released: 2022-06-09
+version: 1.0.1
+date-released: 2022-06-10
 url: "https://github.com/Will-Cooper/gaiaxpy-batch"
