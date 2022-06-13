@@ -5,7 +5,6 @@ import logging
 from functools import partial
 import multiprocessing as mp
 import os
-from re import search
 import time
 from typing import Optional, List
 
@@ -32,24 +31,22 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
     -------
     _: pd.DataFrame
     """
-    i = kwargs.get('i', None)
     sampling = kwargs.get('sampling', None)
     truncate = kwargs.get('truncate', False)
     username = kwargs.get('username', None)
     password = kwargs.get('password', None)
     verbose = kwargs.get('verbose', False)
+    lock.acquire()
+    time.sleep(1)
+    lock.release()
     try:
-        procnum = search('\d+', mp.current_process().name).group()  # get process number if multiprocessing
-    except AttributeError:
-        procnum = i
-    time.sleep(0.01 * int(procnum))  # sleep thread for few ms as underlying temp files are named using time
-    try:
-        return calibrate(idlist, sampling=sampling, truncation=truncate, save_file=False,
-                         username=username, password=password)[0]
+        dfout, _ = calibrate(idlist, sampling=sampling, truncation=truncate, username=username, password=password,
+                             save_file=False)
     except (BaseException, TypeError, IndexError) as e:
         if verbose:
             print(repr(e))
         return None
+    return dfout
 
 
 def allcalib(xpids: List[int], nearest: int, **kwargs) -> Optional[pd.DataFrame]:
@@ -74,11 +71,12 @@ def allcalib(xpids: List[int], nearest: int, **kwargs) -> Optional[pd.DataFrame]
     chunksize = int(nearest * np.ceil(len(xpids) // cpucount / nearest))  # size of each chunk to nearest order mag
     verbose = kwargs.get('verbose', False)
     if chunksize < cpucount:  # serialise if not many sources
-        res = [calibrate_wrap([xid, ], i=i, **kwargs) for i, xid in enumerate(xpids)]
+        res = [calibrate_wrap([xid, ], **kwargs) for i, xid in enumerate(xpids)]
     else:
         xchunk = [xpids[i:i+chunksize] for i in range(0, len(xpids), chunksize)]  # chunk up the list of IDs
         if verbose:
             print(f'Chunksize {chunksize} for {len(xchunk)} threads')
+        mp.freeze_support()
         with mp.Pool() as pool:  # wrap into a process pool
             res = pool.map(partial(calibrate_wrap, **kwargs), xchunk)
     res = [caldf for caldf in res if caldf is not None]  # make a list of the successful calibrations
@@ -240,5 +238,6 @@ def main():
     return
 
 
+lock = mp.Lock()
 if __name__ == '__main__':
     main()
