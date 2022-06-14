@@ -37,7 +37,7 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
     password = kwargs.get('password', None)
     verbose = kwargs.get('verbose', False)
     lock.acquire()
-    time.sleep(1)
+    time.sleep(2)
     lock.release()
     try:
         dfout, _ = calibrate(idlist, sampling=sampling, truncation=truncate, username=username, password=password,
