@@ -64,6 +64,10 @@ We require a username & password as that allows less restrictive
 access to the Gaia archive, c.f. 
 [FAQ](https://www.cosmos.esa.int/web/gaia-users/archive/faq#account-limits-2020).
 
+It's highly recommended that you check that your source IDs have XP spectra available. 
+You can do this by cross-matching with the dr3.xp_summary table.
+It'll work without this check but there can be unintended behaviour.
+
 ### Examples
 When calling from the command line:
 #### Minimum Example
