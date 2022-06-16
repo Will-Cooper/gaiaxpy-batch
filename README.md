@@ -1,6 +1,6 @@
 # GaiaXPy - Batch
 A convenience script for submitting lots (>1000) Gaia DR3
-source IDs through the `gaiaxpy.calibrate` function
+source IDs through the `gaiaxpy.calibrate` or `gaiaxpy.convert` function
 (but can handle any number).
 It allows one to download the spectra directly to 
 individual fits or txt files.
@@ -39,27 +39,26 @@ deactivate  # to leave
 Pass the `gaiaxpy_batch` a **csv** containing DR3
 source IDs as discussed in the usage below:
 ```
-usage: gaiaxpy_batch.py [-h] -f Filename -u Cosmos username -p [-s numpy function start end step] [-t] [-o {fits,txt}] [-i Source ID column name]
-                        [-n Object name column name] [-v]
+usage: gaiaxpy_batch.py [-h] -f Filename [-s numpy function start end step] [-t] [-o {fits,txt}] [-i Source ID column name]
+                        [-n Object name column name] [-u] [-x {BP,RP}] [-v]
 
 optional arguments:
   -h, --help            show this help message and exit
   -f Filename           Input CSV file containing the Gaia DR3 Source IDs
-  -u Cosmos username    Username on Gaia Archive
-  -p                    Prompt Password on Gaia Archive
   -s numpy function start end step
                         Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"
   -t                    Truncate set of bases?
-  -o {fits,txt}         Output of produced spectra
+  -o {fits,txt}         Output of produced spectra (default: None)
   -i Source ID column name
                         Name of the column relating to DR3 Source ID
   -n Object name column name
                         Name of the column relating to the object name (for saving spectra)
-  -v                    Verbose output?
+  -u                    Switch to uncalibrated spectra mode?
+  -x {BP,RP}            If in uncalibrated mode, RP or BP? (default: RP)
+  -v                    Print failure errors?
 
 ```
-The filename, username and password are the only required inputs
-(password will be prompted for, don't type it on the command line). 
+The filename is the only required inputs, username and password will be prompted for. 
 We require a username & password as that allows less restrictive
 access to the Gaia archive, c.f. 
 [FAQ](https://www.cosmos.esa.int/web/gaia-users/archive/faq#account-limits-2020).
@@ -72,12 +71,12 @@ It'll work without this check but there can be unintended behaviour.
 When calling from the command line:
 #### Minimum Example
 ```bash
-python gaiaxpy_batch.py -f mysourceids.csv -u <username> -p
+python gaiaxpy_batch.py -f mysourceids.csv
 ```
 
 #### Expanded example
 ```bash
-python gaiaxpy_batch.py -f mysourceids.csv -u <username> -p -s linspace 600 1050 120 -t -o fits -i source_id -n shortname
+python gaiaxpy_batch.py -f mysourceids.csv -s linspace 600 1050 120 -t -o fits -i source_id -n shortname
 ```
 where `mysourceids.csv` looks like:
 ```csv
@@ -101,6 +100,12 @@ For more information on the `gaiaxpy.calibrate` function,
 read [the tutorial](https://gaia-dpci.github.io/GaiaXPy-website/tutorials/Calibrator%20tutorial.html).
 Additionally, the documentation can be found
 [here](https://gaiaxpy.readthedocs.io/en/latest/gaiaxpy.calibrator.html#gaiaxpy.calibrator.calibrator.calibrate).
+
+### `convert`
+For more information on the `gaiaxpy.convert` function,
+read [the tutorial](https://gaia-dpci.github.io/GaiaXPy-website/tutorials/Converter%20tutorial.html).
+Additionally, the documentation can be found
+[here](https://gaiaxpy.readthedocs.io/en/latest/gaiaxpy.converter.html#gaiaxpy.converter.converter.convert).
 
 ## Citing
 Please cite `gaiaxpy` following the instructions on
