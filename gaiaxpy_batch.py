@@ -9,8 +9,7 @@ import time
 from typing import Optional, List
 
 from astropy.table import Table
-from gaiaxpy import calibrate
-import pandas as pd
+from gaiaxpy import calibrate, convert
 from tqdm import tqdm
 
 from utils import *
@@ -36,12 +35,20 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
     username = kwargs.get('username', None)
     password = kwargs.get('password', None)
     verbose = kwargs.get('verbose', False)
+    uncalibrated = kwargs.get('uncalibrated', False)
+    xp = kwargs.get('xp', 'RP')
+    p = kwargs.get('p')
     lock.acquire()
     time.sleep(2)
     lock.release()
     try:
-        dfout, _ = calibrate(idlist, sampling=sampling, truncation=truncate, username=username, password=password,
-                             save_file=False)
+        if not uncalibrated:
+            dfout, _ = calibrate(idlist, sampling=sampling, truncation=truncate, username=username, password=password,
+                                 save_file=False)
+        else:
+            dfout, _ = convert(idlist, sampling=p(sampling), truncation=truncate, username=username, password=password,
+                               save_file=False)
+            dfout = dfout.loc[dfout.xp == xp]
     except (BaseException, TypeError, IndexError) as e:
         if verbose:
             print(repr(e))
@@ -224,8 +231,10 @@ def main():
     """
     args = sysargs()
     fname = args.filename
+    p = getdispersion(args.xp)
     kwargs = dict(sampling=args.sampling, username=args.username, password=args.password, truncate=args.truncate,
-                  outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol, verbose=args.verbose)
+                  outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol,
+                  uncalibrated=args.uncalibrated, xp=args.xp, verbose=args.verbose, p=p)
     loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
     if args.verbose:
         [logger.setLevel('INFO') for logger in loggers]

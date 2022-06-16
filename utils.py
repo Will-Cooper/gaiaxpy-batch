@@ -2,6 +2,8 @@ import argparse
 import getpass
 
 import numpy as np
+import pandas as pd
+from scipy.interpolate import interp1d
 
 
 class PasswordPromptAction(argparse.Action):
@@ -58,6 +60,10 @@ def sysargs():
                        default='source_id', metavar='Source ID column name')
     _args.add_argument('-n', dest='namecol', default='source_id', metavar='Object name column name',
                        help='Name of the column relating to the object name (for saving spectra)')
+    _args.add_argument('-c', dest='uncalibrated', action='store_true', default=False,
+                       help='Switch to uncalibrated spectra mode?')
+    _args.add_argument('-x', dest='xp', default='RP', type=str, choices=('BP', 'RP'),
+                       help='If in uncalibrated mode, RP or BP?')
     _args.add_argument('-v', dest='verbose', default=False, action='store_true', help='Print failure errors?')
     _args = _args.parse_args()
     if _args.sampling is not None:
@@ -81,3 +87,16 @@ def str2float(s: str):
         Array of floats as parsed from string
     """
     return np.fromiter(filter(None, s[1:-1].replace('\n', '').split(' ')), float)
+
+
+def getdispersion(xp: str = 'RP'):
+    xp = xp.upper()
+    if xp not in ('BP', 'RP'):
+        raise ValueError('Needs to be BP or RP for dispersion')
+    df = pd.read_csv('TabulatedDispersionFunction.csv')
+    df = df.loc[df[f'{xp}_sample'] > -99]
+    worig = df['Wavelength[nm]']
+    rporig = df[f'{xp}_sample']
+    p = interp1d(worig, rporig, kind=3, fill_value='extrapolate')
+    return p
+
