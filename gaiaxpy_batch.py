@@ -1,4 +1,5 @@
 # coding: utf-8
+from getpass import getpass
 from contextlib import redirect_stdout
 from io import StringIO
 import logging
@@ -48,7 +49,7 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Optional[pd.DataFrame]:
         else:
             dfout, _ = convert(idlist, sampling=p(sampling), truncation=truncate, username=username, password=password,
                                save_file=False)
-            dfout = dfout.loc[dfout.xp == xp]
+            dfout = dfout.loc[dfout.xp == xp].drop(columns='xp')
     except (BaseException, TypeError, IndexError) as e:
         if verbose:
             print(repr(e))
@@ -109,7 +110,7 @@ def download_xp(fname: str, **kwargs):
     combdf
         The full csv as given, with newly added flux and fluxerror columns
     """
-    with tqdm(total=100, desc='Calibrating in steps') as pbar:
+    with tqdm(total=100, desc='Downloading in steps') as pbar:
         idcolname = kwargs.get('idcolname', 'source_id')
         # downloaded from archive
         df = pd.read_csv(fname)
@@ -218,6 +219,10 @@ def batch(fname: str, **kwargs):
     kwargs
         Keyword arguments for the calibrate function plus column names and output styling
     """
+    username = getpass('Username: ')
+    passwd = getpass()
+    kwargs['username'] = username
+    kwargs['password'] = passwd
     if not fname.endswith('.csv'):
         raise ValueError('Input file must be a csv')
     combdf = download_xp(fname, **kwargs)
@@ -232,7 +237,7 @@ def main():
     args = sysargs()
     fname = args.filename
     p = getdispersion(args.xp)
-    kwargs = dict(sampling=args.sampling, username=args.username, password=args.password, truncate=args.truncate,
+    kwargs = dict(sampling=args.sampling, truncate=args.truncate,
                   outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol,
                   uncalibrated=args.uncalibrated, xp=args.xp, verbose=args.verbose, p=p)
     loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]

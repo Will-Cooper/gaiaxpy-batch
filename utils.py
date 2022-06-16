@@ -1,38 +1,8 @@
 import argparse
-import getpass
 
 import numpy as np
 import pandas as pd
 from scipy.interpolate import interp1d
-
-
-class PasswordPromptAction(argparse.Action):
-    """
-    Taken from https://stackoverflow.com/questions/27921629/python-using-getpass-with-argparse
-    For prompting a hidden password
-    """
-    def __init__(self,
-                 option_strings,
-                 dest=None,
-                 nargs=0,
-                 default=None,
-                 required=False,
-                 type=None,  # if you're looking why this shadows outerscope, blame argparse
-                 metavar=None,
-                 help=None):  # if you're looking why this shadows outerscope, blame argparse
-        super(PasswordPromptAction, self).__init__(
-            option_strings=option_strings,
-            dest=dest,
-            nargs=nargs,
-            default=default,
-            required=required,
-            metavar=metavar,
-            type=type,
-            help=help)
-
-    def __call__(self, parser, args, values, option_string=None):
-        password = getpass.getpass()
-        setattr(args, self.dest, password)
 
 
 def sysargs():
@@ -46,24 +16,20 @@ def sysargs():
     _args = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     _args.add_argument('-f', dest='filename', required=True, type=str, metavar='Filename',
                        help='Input CSV file containing the Gaia DR3 Source IDs')
-    _args.add_argument('-u', dest='username', type=str, metavar='Cosmos username', required=True,
-                       help='Username on Gaia Archive')
-    _args.add_argument('-p', dest='password', action=PasswordPromptAction, type=str,
-                       help='Prompt Password on Gaia Archive', required=True)
     _args.add_argument('-s', dest='sampling', default=None, type=str, nargs=4,
                        metavar=('numpy function', 'start', 'end', 'step'),
                        help='Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120"')
     _args.add_argument('-t', dest='truncate', help='Truncate set of bases?', default=False, action='store_true')
-    _args.add_argument('-o', dest='outputstyle', help='Output of produced spectra', choices=('fits', 'txt'),
-                       default=None)
+    _args.add_argument('-o', dest='outputstyle', choices=('fits', 'txt'), default=None,
+                       help='Output of produced spectra (default: None)')
     _args.add_argument('-i', dest='idcolname', help='Name of the column relating to DR3 Source ID',
                        default='source_id', metavar='Source ID column name')
     _args.add_argument('-n', dest='namecol', default='source_id', metavar='Object name column name',
                        help='Name of the column relating to the object name (for saving spectra)')
-    _args.add_argument('-c', dest='uncalibrated', action='store_true', default=False,
+    _args.add_argument('-u', dest='uncalibrated', action='store_true', default=False,
                        help='Switch to uncalibrated spectra mode?')
     _args.add_argument('-x', dest='xp', default='RP', type=str, choices=('BP', 'RP'),
-                       help='If in uncalibrated mode, RP or BP?')
+                       help='If in uncalibrated mode, RP or BP? (default: RP)')
     _args.add_argument('-v', dest='verbose', default=False, action='store_true', help='Print failure errors?')
     _args = _args.parse_args()
     if _args.sampling is not None:
@@ -90,6 +56,18 @@ def str2float(s: str):
 
 
 def getdispersion(xp: str = 'RP'):
+    """
+    Creates dispersion spline for converting absolute wavelength to pseudo-wavelength
+
+    Parameters
+    ----------
+    xp: str
+        BP or RP
+
+    Returns
+    -------
+
+    """
     xp = xp.upper()
     if xp not in ('BP', 'RP'):
         raise ValueError('Needs to be BP or RP for dispersion')
@@ -99,4 +77,3 @@ def getdispersion(xp: str = 'RP'):
     rporig = df[f'{xp}_sample']
     p = interp1d(worig, rporig, kind=3, fill_value='extrapolate')
     return p
-
