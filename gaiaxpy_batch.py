@@ -9,7 +9,7 @@ retries server-side failures with increasing waits, and passes the downloaded co
 The spectra are saved to csv and (optionally) per-object fits/txt files.
 """
 import argparse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
 from contextlib import nullcontext, redirect_stdout
 from getpass import getpass
 from io import StringIO
@@ -57,7 +57,7 @@ FATAL_ERRORS = (AttributeError, ImportError, NameError, TypeError)  # bugs, not 
 # reasons given in the failed csv
 NO_XP = 'no XP spectrum'
 DOWNLOAD_FAILED = 'download failed'
-NOT_ATTEMPTED = 'not attempted, archive unavailable'
+NOT_ATTEMPTED = 'not attempted'  # the downloads were stopped (archive unavailable, or interrupted)
 CALIBRATION_FAILED = 'calibration failed'
 INCOMPLETE = (DOWNLOAD_FAILED, NOT_ATTEMPTED)  # reasons worth trying again later
 
@@ -608,13 +608,14 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
     wave, gaiaxpy_sampling = get_sampling(kwargs.get('sampling', None), kwargs.get('uncalibrated', False),
                                           kwargs.get('xp', 'RP'))
     kwargs['sampling'] = gaiaxpy_sampling
-    if chunksize is None:
-        chunksize = LOGGED_IN_CHUNKSIZE if username else ANONYMOUS_CHUNKSIZE
-    chunksize = max(int(chunksize), 1)
+    workers = max(int(workers), 1)
     if username and workers > LOGGED_IN_MAX_WORKERS:
         log.warning(f'The Gaia archive allows {LOGGED_IN_MAX_WORKERS} active jobs per user, '
                     f'using {LOGGED_IN_MAX_WORKERS} workers')
         workers = LOGGED_IN_MAX_WORKERS
+    if chunksize is None:  # the default, made smaller if needed to give every worker a chunk
+        chunksize = min(LOGGED_IN_CHUNKSIZE if username else ANONYMOUS_CHUNKSIZE, -(-len(xpids) // workers))
+    chunksize = max(int(chunksize), 1)
     xchunk = [xpids[i:i + chunksize] for i in range(0, len(xpids), chunksize)]  # chunk up the list of IDs
     workers = max(min(int(workers), len(xchunk)), 1)
     log.info(f'{len(xpids)} sources in {len(xchunk)} chunks of up to {chunksize}, using {workers} workers, '
@@ -625,15 +626,38 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
     res, samplings, failed = [], [], {}
     oldtimeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(TIMEOUT if timeout is None else timeout)  # astroquery connections have no timeout
+    collected = set()
+
+    def collect(future):
+        chunkres, chunksamp, chunkfailed = future.result()
+        res.extend(chunkres)
+        samplings.extend(chunksamp)
+        failed.update(chunkfailed)
+        collected.add(future)
+
     try:
         with tqdm(total=len(xpids), desc='Downloading XP spectra', unit='source', file=sys.stderr) as pbar:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = [pool.submit(_process, chunk, archive, state, pbar, **kwargs) for chunk in xchunk]
+            pool = ThreadPoolExecutor(max_workers=workers)
+            futures = [pool.submit(_process, chunk, archive, state, pbar, **kwargs) for chunk in xchunk]
+            try:
                 for future in as_completed(futures):
-                    chunkres, chunksamp, chunkfailed = future.result()
-                    res.extend(chunkres)
-                    samplings.extend(chunksamp)
-                    failed.update(chunkfailed)
+                    collect(future)
+            except KeyboardInterrupt:  # stop starting requests, keep what has finished
+                archive.stop.set()
+                state['abort'] = 'Interrupted, the remaining sources were not attempted'
+                pool.shutdown(wait=False, cancel_futures=True)
+                running = [future for future in futures if future.running()]
+                log.warning(f'Interrupted, waiting for {len(running)} requests in progress to finish '
+                            f'(Ctrl-C again to quit without saving)')
+                try:  # cancelled futures never count as done for wait()
+                    futures_wait([future for future in futures if not future.cancelled()])
+                except KeyboardInterrupt:
+                    os._exit(130)
+                for future in futures:
+                    if future not in collected and not future.cancelled():
+                        collect(future)
+            finally:
+                pool.shutdown(wait=False)
     finally:
         socket.setdefaulttimeout(oldtimeout)
     if state['abort']:
@@ -656,7 +680,8 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
         for col in ('flux', 'flux_error'):
             stackdf[col] = [np.asarray(arr)[order] for arr in stackdf[col]]
     found = set(stackdf.source_id.astype(np.int64))
-    failed = {xid: failed.get(xid, DOWNLOAD_FAILED) for xid in xpids if xid not in found}  # input order
+    unknown = NOT_ATTEMPTED if state['abort'] else DOWNLOAD_FAILED  # e.g. chunks cancelled by an interruption
+    failed = {xid: failed.get(xid, unknown) for xid in xpids if xid not in found}  # input order
     return stackdf, wave, failed
 
 

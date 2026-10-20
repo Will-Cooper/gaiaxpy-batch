@@ -233,12 +233,33 @@ def test_expired_session_logs_in_again(monkeypatch):
 
 def test_default_chunksize_and_workers(monkeypatch):
     server, _ = install(monkeypatch)
-    gb.download_xp(list(range(1, 121)))
+    gb.download_xp(list(range(1000, 2000)))
     assert max(len(call) for call in server.calls) == gb.ANONYMOUS_CHUNKSIZE
     server, _ = install(monkeypatch)
-    gb.download_xp(list(range(1, 1201)), username='me', password='pw', workers=10)
+    gb.download_xp(list(range(1000, 11000)), username='me', password='pw', workers=10)
     assert max(len(call) for call in server.calls) == gb.LOGGED_IN_CHUNKSIZE
     assert server.logins <= gb.LOGGED_IN_MAX_WORKERS
+    server, _ = install(monkeypatch)  # fewer sources than workers times the chunk size: spread over the workers
+    gb.download_xp(list(range(1000, 2000)), username='me', password='pw', workers=4)
+    assert [len(call) for call in server.calls] == [250] * 4
+    server, _ = install(monkeypatch)  # unless the chunk size is given
+    gb.download_xp(list(range(1000, 2000)), username='me', password='pw', workers=4, chunksize=1000)
+    assert [len(call) for call in server.calls] == [1000]
+
+
+def test_interrupt_keeps_finished(monkeypatch):
+    install(monkeypatch)
+    real = gb.as_completed
+
+    def interrupted(futures):  # Ctrl-C after the first chunk is collected
+        iterator = real(futures)
+        yield next(iterator)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gb, 'as_completed', interrupted)
+    stackdf, wave, failed = gb.download_xp(list(range(1, 21)), chunksize=1, workers=1)
+    assert len(stackdf) >= 1 and len(stackdf) + len(failed) == 20
+    assert set(failed.values()) == {gb.NOT_ATTEMPTED}
 
 
 def test_archive_limit(monkeypatch):
@@ -253,7 +274,7 @@ def test_archive_limit(monkeypatch):
 def test_fatal_error_not_retried(monkeypatch):
     server, gaiaxpy = install(monkeypatch, gaiaxpy=FakeGaiaXPy(error=TypeError))
     with pytest.raises(TypeError):
-        gb.download_xp([1, 2, BADCAL, 4])
+        gb.download_xp([1, 2, BADCAL, 4], chunksize=10)
     assert len(gaiaxpy.calls) == 1
 
 

@@ -19,8 +19,10 @@ and one failure (the archive is not always reliable) loses the whole list.
 This script downloads the XP continuous spectra (the basis function coefficients) itself with `astroquery`,
 in the same way GaiaXPy does, and hands them to GaiaXPy as a DataFrame to calibrate or convert,
 so the spectra are identical to GaiaXPy's own. It:
-* splits the list into chunks (default 50 source IDs anonymously, 1000 logged in) and downloads them in
-  parallel (default 4 workers), with one session per worker that logs in once,
+* splits the list into chunks (default 50 source IDs anonymously, 1000 logged in, smaller if needed to give every
+  worker a chunk) and downloads them in parallel (default 4 workers), with one session per worker that logs in once,
+* on Ctrl-C, stops starting requests, waits for those in progress and saves what has finished
+  (Ctrl-C again quits straight away, without saving),
 * retries a request that fails on the server's side (HTTP 5xx, broken responses, time-outs) with increasing waits
   (30, 60, 120 s by default), and stops if several requests in a row fail every retry, as the archive is then
   probably down,
@@ -130,7 +132,7 @@ For an input `mysourceids.csv`:
 * `mysourceids_XP_spectra_cut.csv`: the same, only for the rows with spectra,
 * `mysourceids_XP_spectra_failed.csv` (if any): the source IDs without spectra, with a `reason`:
   `no XP spectrum`, `calibration failed`, `download failed` (failed every retry) or
-  `not attempted, archive unavailable` (the script stopped),
+  `not attempted` (the script stopped, as the archive seemed unavailable or after Ctrl-C),
 * `outputspectra/<name>.fits` or `.txt` (with `-o`): wavelength [nm], flux and flux error per object.
 
 If some sources could not be downloaded, the script says so and exits with status 1 (2 if nothing was downloaded).
