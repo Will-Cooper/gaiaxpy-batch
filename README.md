@@ -1,22 +1,33 @@
 # GaiaXPy - Batch
-A convenience script for submitting lots (>50) of Gaia DR3
-source IDs through the `gaiaxpy.calibrate` or `gaiaxpy.convert` function
+A convenience script for getting XP spectra for lots (>50) of Gaia DR3
+source IDs, calibrated with `gaiaxpy.calibrate` or converted with `gaiaxpy.convert`
 (but it can handle any number).
 It allows one to download the spectra directly to
 individual fits or txt files.
 
 ## Do you need this?
 [GaiaXPy](https://github.com/gaia-dpci/GaiaXPy) itself accepts a list of source IDs
-(or an ADQL query), but it sends all of them to the Gaia archive in a single DataLink request.
-Since the October 2026 release of the Gaia archive, DataLink requests are limited in size:
-for anonymous users, a request with more than 50 source IDs is rejected
-("Maximum number of Source Ids reached (max: 50, ...)", tested on 2026-10-20).
-So GaiaXPy alone cannot retrieve more than 50 sources at once anonymously, and one failure loses the whole list.
-This script:
-* splits the list into chunks (default 50 source IDs, the anonymous limit) and downloads them in parallel (default 4 workers),
+(or an ADQL query), but it sends all of them to the Gaia archive in a single DataLink request,
+logging in again each time.
+The [Gaia archive user quotas](https://www.cosmos.esa.int/web/gaia-users/archive/collaborate#GaiaArchiveUserQuotas)
+limit DataLink requests to **50 source IDs anonymously and 5000 logged in**,
+and allow 5 active jobs per registered user.
+A larger request is rejected ("Maximum number of Source Ids reached (max: 50, ...)"),
+so GaiaXPy alone cannot retrieve more than 50 sources at once anonymously,
+and one failure (the archive is not always reliable) loses the whole list.
+
+This script downloads the XP continuous spectra (the basis function coefficients) itself with `astroquery`,
+in the same way GaiaXPy does, and hands them to GaiaXPy as a DataFrame to calibrate or convert,
+so the spectra are identical to GaiaXPy's own. It:
+* splits the list into chunks (default 50 source IDs anonymously, 1000 logged in) and downloads them in
+  parallel (default 4 workers), with one session per worker that logs in once,
+* retries a request that fails on the server's side (HTTP 5xx, broken responses, time-outs) with increasing waits
+  (30, 60, 120 s by default), and stops if several requests in a row fail every retry, as the archive is then
+  probably down,
 * when the archive reports its maximum number of source IDs per request, splits all chunks to that size,
-* splits otherwise failed chunks in half and retries them, down to single source IDs,
-* records the source IDs without spectra in a separate csv,
+* splits a chunk rejected as a bad request in half and tries each half again, down to single source IDs,
+* splits spectra that fail to calibrate in half and calibrates each half again (locally, without downloading again),
+* records the source IDs without spectra, and why, in a separate csv that can be used as the input to try again,
 * writes each spectrum to its own fits or txt file, with the correct wavelength grid and units,
 * takes the sampling in absolute wavelength [nm] for uncalibrated (`convert`) spectra too.
 
@@ -66,7 +77,8 @@ source IDs as discussed in the usage below:
 ```
 usage: gaiaxpy-batch [-h] -f Filename [-s numpy function start end step] [-t] [-o {fits,txt}]
                      [-i Source ID column name] [-n Object name column name] [-u] [-x {BP,RP}]
-                     [-c CHUNKSIZE] [-w WORKERS] [-a] [-v] [--version]
+                     [-c CHUNKSIZE] [-w WORKERS] [--retries RETRIES] [--retry-delay RETRY_DELAY]
+                     [--timeout TIMEOUT] [-a] [-v] [--version]
 
 options:
   -h, --help            show this help message and exit
@@ -86,9 +98,14 @@ options:
   -u, --uncalibrated    Switch to uncalibrated spectra mode?
   -x, --xp {BP,RP}      If in uncalibrated mode, RP or BP? (default: RP)
   -c, --chunksize CHUNKSIZE
-                        Number of source IDs per archive request (default: 50, the anonymous archive limit)
+                        Number of source IDs per archive request (default: 50 anonymous, 1000 logged in;
+                        the archive allows up to 50 and 5000)
   -w, --workers WORKERS
-                        Number of parallel archive requests (default: 4)
+                        Number of parallel archive requests (default: 4, at most 5 when logged in)
+  --retries RETRIES     Retries of a request after a server-side failure (default: 3)
+  --retry-delay RETRY_DELAY
+                        Seconds to wait before the first retry, doubled for each one after (default: 30)
+  --timeout TIMEOUT     Seconds without a response before a connection is given up (default: 900)
   -a, --anonymous       Query the archive without logging in (otherwise uses $GAIA_USERNAME and
                         $GAIA_PASSWORD, or prompts)
   -v, --verbose         Print failure errors?
@@ -97,26 +114,33 @@ options:
 The filename is the only required input.
 The username and password are read from the `GAIA_USERNAME` and `GAIA_PASSWORD`
 environment variables, or prompted for, unless `-a` is given.
-We recommend logging in as that allows less restrictive
-access to the Gaia archive, c.f.
-[FAQ](https://www.cosmos.esa.int/web/gaia-users/archive/faq).
-The archive allows at most 5 jobs per user in parallel, so keep `-w` at 5 or below.
-The maximum number of source IDs per request for logged-in users has not been tested here;
-either way, the script picks up the archive's limit from its first rejected request.
+We recommend logging in, as that allows 5000 rather than 50 source IDs per request, c.f. the
+[user quotas](https://www.cosmos.esa.int/web/gaia-users/archive/collaborate#GaiaArchiveUserQuotas).
+Each worker logs in once; if the login fails (astroquery only logs this, the script checks),
+it is retried like any other request and the script then stops,
+as the username or password is probably wrong, or the archive is down.
 
 It's recommended that you check that your source IDs have XP spectra available.
 You can do this by cross-matching with the `gaiadr3.xp_summary` table
 (or `has_xp_continuous` in `gaiadr3.gaia_source`).
-Source IDs without spectra are written to `<input>_XP_spectra_failed.csv`.
 
 ### Outputs
 For an input `mysourceids.csv`:
 * `mysourceids_XP_spectra.csv`: the input csv with `flux` and `flux_error` array columns added,
 * `mysourceids_XP_spectra_cut.csv`: the same, only for the rows with spectra,
-* `mysourceids_XP_spectra_failed.csv`: the source IDs without spectra (if any),
+* `mysourceids_XP_spectra_failed.csv` (if any): the source IDs without spectra, with a `reason`:
+  `no XP spectrum`, `calibration failed`, `download failed` (failed every retry) or
+  `not attempted, archive unavailable` (the script stopped),
 * `outputspectra/<name>.fits` or `.txt` (with `-o`): wavelength [nm], flux and flux error per object.
 
-Fluxes are in W m<sup>-2</sup> nm<sup>-1</sup> (calibrated) or electron s<sup>-1</sup> (uncalibrated, `-u`).
+If some sources could not be downloaded, the script says so and exits with status 1 (2 if nothing was downloaded).
+The failed csv can be given straight back to the script, later, to try them again:
+```bash
+gaiaxpy-batch -f mysourceids_XP_spectra_failed.csv -o fits
+```
+
+Fluxes are in W m<sup>-2</sup> nm<sup>-1</sup> (calibrated) or electron s<sup>-1</sup> (uncalibrated, `-u`;
+`electron/s` is not a FITS standard unit, so astropy warns when reading it).
 The default wavelength grid is GaiaXPy's: 336-1020 nm in 2 nm steps when calibrated,
 and pseudo-wavelengths 0-60 (converted to nm) when uncalibrated.
 The array columns in the csvs can be read back with `gaiaxpy_batch.str2float`.

@@ -1,11 +1,12 @@
 # coding: utf-8
 """
-Batch downloading of Gaia DR3 XP spectra through GaiaXPy.
+Batch downloading of Gaia DR3 XP spectra, calibrated (or converted) with GaiaXPy.
 
-GaiaXPy sends every source ID it is given to the Gaia archive in a single DataLink request.
-This script splits a large list of source IDs into chunks, downloads the chunks in parallel threads,
-retries failed chunks by splitting them in half, and saves the spectra to csv and (optionally) per-object
-fits/txt files.
+GaiaXPy sends every source ID it is given to the Gaia archive in a single DataLink request, logging in each time,
+and the archive limits each request to 50 (anonymous) or 5000 (logged in) source IDs.
+This script downloads the XP continuous spectra with astroquery in chunks, in parallel threads that each log in once,
+retries server-side failures with increasing waits, and passes the downloaded coefficients to GaiaXPy.
+The spectra are saved to csv and (optionally) per-object fits/txt files.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,13 +16,18 @@ from io import StringIO
 import logging
 import os
 import re
+import socket
 import sys
-from typing import List, Optional, Tuple
+import threading
+from typing import Callable, Dict, List, Optional, Tuple
 
+from astropy.io import fits
 from astropy.table import Table
 from astroquery import log as astroquery_log
+from astroquery.gaia import GaiaClass
 import gaiaxpy
 from gaiaxpy import calibrate, convert, pwl_to_wl, wl_to_pwl
+from gaiaxpy.core.server import data_release, gaia_server
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -34,9 +40,26 @@ SAMPLING_FUNCTIONS = ('linspace', 'arange', 'geomspace')
 DEFAULT_PWL = np.linspace(0, 60, 600)  # default pseudo-wavelength sampling of gaiaxpy.convert
 WL_LIMITS = (330., 1050.)  # absolute wavelength [nm] limits accepted by gaiaxpy.calibrate
 PWL_LIMITS = (-10., 70.)  # pseudo-wavelength limits accepted by gaiaxpy.convert
-NO_DATA_MESSAGE = 'No continuous BP/RP data found'  # raised by GaiaXPy when no source in a request has XP spectra
+
+# Gaia archive user quotas: https://www.cosmos.esa.int/web/gaia-users/archive/collaborate#GaiaArchiveUserQuotas
+ANONYMOUS_CHUNKSIZE = 50  # DataLink sources per request, anonymous
+LOGGED_IN_CHUNKSIZE = 1000  # the logged in quota is 5000, but smaller requests lose less when one fails
+LOGGED_IN_MAX_WORKERS = 5  # active jobs allowed per registered user
+RETRIES = 3  # retries of a request after a server-side failure
+RETRY_DELAY = 30.  # seconds to wait before the first retry, doubled for each one after
+TIMEOUT = 900.  # seconds without a response before a connection is given up
+ABORT_AFTER = 3  # chunks in a row failing every retry before the archive is taken to be unavailable
+
 LIMIT_PATTERN = re.compile(r'Maximum number of Source Ids reached \(max: (\d+)')  # archive's request size error
-FATAL_ERRORS =(AttributeError, ImportError, NameError, TypeError)  # bugs, not archive failures: no point retrying
+STATUS_PATTERN = re.compile(r'\b(?:HTTP Error|Error|status code)\s*:?\s*(\d{3})\b', re.IGNORECASE)
+FATAL_ERRORS = (AttributeError, ImportError, NameError, TypeError)  # bugs, not archive failures: no point retrying
+
+# reasons given in the failed csv
+NO_XP = 'no XP spectrum'
+DOWNLOAD_FAILED = 'download failed'
+NOT_ATTEMPTED = 'not attempted, archive unavailable'
+CALIBRATION_FAILED = 'calibration failed'
+INCOMPLETE = (DOWNLOAD_FAILED, NOT_ATTEMPTED)  # reasons worth trying again later
 
 
 def parse_sampling(func: str, start: float, end: float, step: float) -> np.ndarray:
@@ -101,10 +124,19 @@ def sysargs(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help='Switch to uncalibrated spectra mode?')
     _args.add_argument('-x', '--xp', dest='xp', default='RP', type=str.upper, choices=('BP', 'RP'),
                        help='If in uncalibrated mode, RP or BP? (default: RP)')
-    _args.add_argument('-c', '--chunksize', dest='chunksize', default=50, type=int,
-                       help='Number of source IDs per archive request (default: 50, the anonymous archive limit)')
+    _args.add_argument('-c', '--chunksize', dest='chunksize', default=None, type=int,
+                       help=f'Number of source IDs per archive request (default: {ANONYMOUS_CHUNKSIZE} anonymous, '
+                            f'{LOGGED_IN_CHUNKSIZE} logged in; the archive allows up to 50 and 5000)')
     _args.add_argument('-w', '--workers', dest='workers', default=4, type=int,
-                       help='Number of parallel archive requests (default: 4)')
+                       help=f'Number of parallel archive requests (default: 4, at most {LOGGED_IN_MAX_WORKERS} '
+                            f'when logged in)')
+    _args.add_argument('--retries', dest='retries', default=RETRIES, type=int,
+                       help=f'Retries of a request after a server-side failure (default: {RETRIES})')
+    _args.add_argument('--retry-delay', dest='retry_delay', default=RETRY_DELAY, type=float,
+                       help=f'Seconds to wait before the first retry, doubled for each one after '
+                            f'(default: {RETRY_DELAY:.0f})')
+    _args.add_argument('--timeout', dest='timeout', default=TIMEOUT, type=float,
+                       help=f'Seconds without a response before a connection is given up (default: {TIMEOUT:.0f})')
     _args.add_argument('-a', '--anonymous', dest='anonymous', default=False, action='store_true',
                        help='Query the archive without logging in (otherwise uses $GAIA_USERNAME and '
                             '$GAIA_PASSWORD, or prompts)')
@@ -205,16 +237,16 @@ def get_sampling(sampling: Optional[np.ndarray] = None, uncalibrated: bool = Fal
     return wave, pwl
 
 
-def calibrate_wrap(idlist: List[int], **kwargs) -> Tuple[pd.DataFrame, np.ndarray]:
+def calibrate_wrap(coeffs: pd.DataFrame, **kwargs) -> Tuple[pd.DataFrame, np.ndarray]:
     """
-    Wraps the GaiaXPy calibrate or convert function with a list of source IDs
+    Wraps the GaiaXPy calibrate or convert function with downloaded XP continuous spectra
 
     Parameters
     ----------
-    idlist: List[int]
-        List of Gaia DR3 Source IDs
+    coeffs: pd.DataFrame
+        The XP continuous spectra (basis function coefficients) as downloaded from the archive
     kwargs
-        Containing sampling information, truncation switch, mode switch, username and password information
+        Containing sampling information, truncation switch and mode switch
 
     Returns
     -------
@@ -225,118 +257,339 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Tuple[pd.DataFrame, np.ndarra
     """
     sampling = kwargs.get('sampling', None)
     truncate = kwargs.get('truncate', False)
-    username = kwargs.get('username', None)
-    password = kwargs.get('password', None)
     uncalibrated = kwargs.get('uncalibrated', False)
     xp = kwargs.get('xp', 'RP').upper()
     if not uncalibrated:
-        dfout, sampling = calibrate(idlist, sampling=sampling, truncation=truncate, username=username,
-                                    password=password, save_file=False)
+        dfout, sampling = calibrate(coeffs, sampling=sampling, truncation=truncate, save_file=False)
     else:
-        dfout, sampling = convert(idlist, sampling=sampling, truncation=truncate, username=username,
-                                  password=password, save_file=False)
+        dfout, sampling = convert(coeffs, sampling=sampling, truncation=truncate, save_file=False)
         dfout = dfout.loc[dfout.xp == xp].drop(columns='xp')
     return dfout[['source_id', 'flux', 'flux_error']], sampling
 
 
-def _split(idlist: List[int], pbar: tqdm, limit: dict, size: int,
-           **kwargs) -> Tuple[List[pd.DataFrame], List[np.ndarray]]:
+class ArchiveError(Exception):
+    """An archive request failed on every retry"""
+
+
+class ArchiveUnavailable(ArchiveError):
+    """The archive appears to be down, or the login failed: stop downloading"""
+
+
+def http_status(e: Exception) -> Optional[int]:
     """
-    Splits a chunk of source IDs into pieces of a given size and tries each piece
+    Gets the HTTP status code of an exception, if it has one
 
     Parameters
     ----------
-    idlist: List[int]
-        List of Gaia DR3 Source IDs
-    pbar: tqdm
-        The progress bar, updated with the number of source IDs finished
-    limit: dict
-        The archive's maximum number of source IDs per request (key 'max'), shared between threads
-    size: int
-        The size of each piece
+    e: Exception
+        The exception raised by an archive request
+
+    Returns
+    -------
+    _: Optional[int]
+        The HTTP status code
+    """
+    status = getattr(getattr(e, 'response', None), 'status_code', None)
+    if status is None:
+        match = STATUS_PATTERN.search(str(e))
+        status = int(match.group(1)) if match else None
+    return status
+
+
+def is_transient(e: Exception) -> bool:
+    """
+    Whether an archive failure is probably temporary and worth retrying: server errors (HTTP 5xx), timeouts,
+    lost sessions and broken responses (e.g. 'File is not a zip file'), rather than a bad request (other HTTP 4xx)
+
+    Parameters
+    ----------
+    e: Exception
+        The exception raised by an archive request
+
+    Returns
+    -------
+    _: bool
+        True if the request should be retried
+    """
+    status = http_status(e)
+    return status is None or status >= 500 or status in (401, 403, 408, 429)
+
+
+def _short(e: Exception) -> str:
+    """The first line of an exception, for log messages"""
+    lines = [line for line in str(e).splitlines() if line.strip()]
+    return f'{type(e).__name__}: {" ".join(lines[:2])}'[:200]
+
+
+class Archive:
+    """
+    Downloads XP continuous spectra from the Gaia archive with astroquery, using one session per thread
+    (each logged in once), and retrying server-side failures with increasing waits
+    """
+
+    def __init__(self, username: Optional[str] = None, password: Optional[str] = None, retries: int = RETRIES,
+                 delay: float = RETRY_DELAY):
+        """
+        Parameters
+        ----------
+        username: Optional[str]
+            Cosmos username, None for anonymous
+        password: Optional[str]
+            Cosmos password
+        retries: int
+            Retries of a request after a server-side failure
+        delay: float
+            Seconds to wait before the first retry, doubled for each one after
+        """
+        self.username = username
+        self.password = password
+        self.retries = max(int(retries), 0)
+        self.delay = max(float(delay), 0.)
+        self.stop = threading.Event()  # set when the archive is taken to be unavailable
+        self._local = threading.local()
+
+    def session(self) -> GaiaClass:
+        """
+        The astroquery session of this thread, created (and logged in) on first use
+
+        Returns
+        -------
+        gaia: GaiaClass
+            The session
+        """
+        gaia = getattr(self._local, 'gaia', None)
+        if gaia is None:
+            gaia = GaiaClass(gaia_tap_server=gaia_server, gaia_data_server=gaia_server, show_server_messages=False)
+            if self.username:
+                try:
+                    self.retry(lambda: self._login(gaia), 'Login')
+                except ArchiveError as e:
+                    raise ArchiveUnavailable(f'Could not log in to the Gaia archive as {self.username}: '
+                                             f'check the username and password, or the archive status') from e
+            self._local.gaia = gaia
+        return gaia
+
+    def _login(self, gaia: GaiaClass):
+        """
+        Logs a session in, raising if it did not work (astroquery logs login errors rather than raising them)
+
+        Parameters
+        ----------
+        gaia: GaiaClass
+            The session
+        """
+        gaia.login(user=self.username, password=self.password)
+        tap = getattr(gaia, '_TapPlus__isLoggedIn', None)  # astroquery internals, None if they change
+        data = getattr(getattr(gaia, '_GaiaClass__gaiadata', None), '_TapPlus__isLoggedIn', None)
+        if tap is False or data is False:
+            raise ConnectionError('Gaia archive login failed')
+
+    def retry(self, func: Callable, what: str):
+        """
+        Calls a function, retrying it with increasing waits while it fails in a way that is probably temporary
+
+        Parameters
+        ----------
+        func: Callable
+            The request
+        what: str
+            What the request is, for log messages
+
+        Returns
+        -------
+        _
+            Whatever the function returns
+        """
+        for attempt in range(self.retries + 1):
+            if self.stop.is_set():
+                raise ArchiveUnavailable('Stopped, the Gaia archive appears to be unavailable')
+            try:
+                return func()
+            except FATAL_ERRORS + (ArchiveError,):
+                raise
+            except Exception as e:
+                if LIMIT_PATTERN.search(str(e)) or not is_transient(e):
+                    raise  # handled by the caller
+                if attempt == self.retries:
+                    raise ArchiveError(f'{what} failed {attempt + 1} times, lastly with {_short(e)}') from e
+                if http_status(e) in (401, 403):
+                    self._local.gaia = None  # the session has expired, log in again
+                wait = self.delay * 2 ** attempt
+                log.warning(f'{what} failed ({_short(e)}), retrying in {wait:.0f} s ({attempt + 1}/{self.retries})')
+                self.stop.wait(wait)
+
+    def load(self, idlist: List[int]) -> Optional[pd.DataFrame]:
+        """
+        Downloads the XP continuous spectra of a list of source IDs, as GaiaXPy does itself
+
+        Parameters
+        ----------
+        idlist: List[int]
+            List of Gaia DR3 Source IDs
+
+        Returns
+        -------
+        _: Optional[pd.DataFrame]
+            The XP continuous spectra, None if none of the sources have any
+        """
+        def attempt():
+            result = self.session().load_data(ids=idlist, format='csv', data_release=data_release,
+                                              data_structure='DATAMODEL_GAIA', retrieval_type='XP_CONTINUOUS',
+                                              avoid_datatype_check=True)
+            keys = [key for key in result if 'continuous' in key.lower()]
+            return result[keys[0]][0].to_pandas() if keys else None
+        return self.retry(attempt, f'Download of {len(idlist)} sources starting {idlist[0]}')
+
+
+Results = Tuple[List[pd.DataFrame], List[np.ndarray], Dict[int, str]]  # spectra, their samplings, failed IDs
+
+
+def _merge(results: List[Results]) -> Results:
+    """Combines the results of several pieces of a chunk"""
+    frames, samplings, failed = [], [], {}
+    for pieceframes, piecesamplings, piecefailed in results:
+        frames.extend(pieceframes)
+        samplings.extend(piecesamplings)
+        failed.update(piecefailed)
+    return frames, samplings, failed
+
+
+def _calibrate_rows(coeffs: pd.DataFrame, **kwargs) -> Results:
+    """
+    Calibrates downloaded spectra, splitting them in half and retrying each half on failure (locally, no download)
+
+    Parameters
+    ----------
+    coeffs: pd.DataFrame
+        The XP continuous spectra as downloaded from the archive
     kwargs
         To be passed to the calibrate function
 
     Returns
     -------
-    res: List[pd.DataFrame]
-        The successful spectra
-    samplings: List[np.ndarray]
-        The sampling of each success
+    _: Results
+        The spectra, their samplings and the source IDs that failed, with the reason
     """
-    res, samplings = [], []
-    for i in range(0, len(idlist), size):
-        pieceres, piecesamp = _bisect(idlist[i:i + size], pbar, limit, **kwargs)
-        res.extend(pieceres)
-        samplings.extend(piecesamp)
-    return res, samplings
-
-
-def _bisect(idlist: List[int], pbar: tqdm, limit: dict, **kwargs) -> Tuple[List[pd.DataFrame], List[np.ndarray]]:
-    """
-    Tries a chunk of source IDs, splitting it in half and retrying each half on failure.
-    If the archive says the chunk is too large, the chunk is split to the archive's limit instead,
-    and the limit is kept for the other chunks
-
-    Parameters
-    ----------
-    idlist: List[int]
-        List of Gaia DR3 Source IDs
-    pbar: tqdm
-        The progress bar, updated with the number of source IDs finished
-    limit: dict
-        The archive's maximum number of source IDs per request (key 'max'), shared between threads
-    kwargs
-        To be passed to the calibrate function
-
-    Returns
-    -------
-    res: List[pd.DataFrame]
-        The successful spectra
-    samplings: List[np.ndarray]
-        The sampling of each success
-    """
-    maxids = limit.get('max')
-    if maxids is not None and len(idlist) > maxids:
-        return _split(idlist, pbar, limit, maxids, **kwargs)
     try:
-        dfout, sampling = calibrate_wrap(idlist, **kwargs)
+        dfout, sampling = calibrate_wrap(coeffs, **kwargs)
     except FATAL_ERRORS:
         raise
     except Exception as e:
-        if NO_DATA_MESSAGE in str(e):  # none of these sources have XP spectra, no point splitting
-            log.info(f'No XP spectra for {len(idlist)} sources starting {idlist[0]}')
-            pbar.update(len(idlist))
-            return [], []
+        if len(coeffs) == 1:
+            xid = int(coeffs.source_id.iloc[0])
+            log.info(f'Calibration of {xid} failed: {_short(e)}')
+            return [], [], {xid: CALIBRATION_FAILED}
+        half = (len(coeffs) + 1) // 2
+        return _merge([_calibrate_rows(coeffs.iloc[:half], **kwargs), _calibrate_rows(coeffs.iloc[half:], **kwargs)])
+    return [dfout, ], [sampling, ], {}
+
+
+def _process(idlist: List[int], archive: Archive, state: dict, pbar: tqdm, **kwargs) -> Results:
+    """
+    Downloads and calibrates a chunk of source IDs.
+    If the archive says the chunk is too large, the chunk is split to the archive's limit and the limit is kept for
+    the other chunks. A chunk failing with a bad request is split in half and each half tried again.
+    Chunks that fail every retry are given up, and after several in a row the archive is taken to be unavailable
+
+    Parameters
+    ----------
+    idlist: List[int]
+        List of Gaia DR3 Source IDs
+    archive: Archive
+        The archive connections
+    state: dict
+        Shared between threads: the archive's limit ('limit'), chunks in a row failing every retry ('exhausted'),
+        why the downloads were stopped ('abort') and a lock ('lock')
+    pbar: tqdm
+        The progress bar, updated with the number of source IDs finished
+    kwargs
+        To be passed to the calibrate function
+
+    Returns
+    -------
+    _: Results
+        The spectra, their samplings and the source IDs that failed, with the reason
+    """
+    def pieces(size: int) -> Results:
+        return _merge([_process(idlist[i:i + size], archive, state, pbar, **kwargs)
+                       for i in range(0, len(idlist), size)])
+
+    maxids = state['limit']
+    if maxids is not None and len(idlist) > maxids:
+        return pieces(maxids)
+    try:
+        coeffs = archive.load(idlist)
+    except FATAL_ERRORS:
+        raise
+    except ArchiveUnavailable as e:
+        with state['lock']:
+            if not archive.stop.is_set():
+                archive.stop.set()
+                state['abort'] = str(e)
+        pbar.update(len(idlist))
+        return [], [], dict.fromkeys(idlist, NOT_ATTEMPTED)
+    except ArchiveError as e:
+        log.error(str(e))
+        with state['lock']:
+            state['exhausted'] += 1
+            if state['exhausted'] >= ABORT_AFTER and not archive.stop.is_set():
+                archive.stop.set()
+                state['abort'] = (f'{ABORT_AFTER} requests in a row failed every retry, '
+                                  f'the Gaia archive appears to be unavailable')
+        pbar.update(len(idlist))
+        return [], [], dict.fromkeys(idlist, DOWNLOAD_FAILED)
+    except Exception as e:
         toomany = LIMIT_PATTERN.search(str(e))
         if toomany and int(toomany.group(1)) < len(idlist):
             maxids = int(toomany.group(1))
-            if limit.get('max') != maxids:
-                limit['max'] = maxids
-                log.warning(f'The Gaia archive allows {maxids} source IDs per request, using chunks of {maxids}')
-            return _split(idlist, pbar, limit, maxids, **kwargs)
-        log.info(f'Chunk of {len(idlist)} sources starting {idlist[0]} failed: {e!r}')
+            with state['lock']:
+                if state['limit'] != maxids:
+                    state['limit'] = maxids
+                    log.warning(f'The Gaia archive allows {maxids} source IDs per request, using chunks of {maxids}')
+            return pieces(maxids)
+        # a bad request, perhaps because of one of the source IDs
+        log.info(f'Download of {len(idlist)} sources starting {idlist[0]} failed: {_short(e)}')
         if len(idlist) == 1:
             pbar.update(1)
-            return [], []
-        return _split(idlist, pbar, limit, (len(idlist) + 1) // 2, **kwargs)
+            return [], [], {idlist[0]: DOWNLOAD_FAILED}
+        return pieces((len(idlist) + 1) // 2)
+    with state['lock']:
+        state['exhausted'] = 0
+    if coeffs is None or not len(coeffs):
+        pbar.update(len(idlist))
+        return [], [], dict.fromkeys(idlist, NO_XP)
+    found = set(coeffs.source_id.astype(np.int64))
+    frames, samplings, failed = _calibrate_rows(coeffs, **kwargs)
+    failed.update({xid: NO_XP for xid in idlist if xid not in found})
     pbar.update(len(idlist))
-    return [dfout, ], [sampling, ]
+    return frames, samplings, failed
 
 
-def download_xp(xpids: List[int], chunksize: int = 50, workers: int = 4,
-                **kwargs) -> Tuple[pd.DataFrame, np.ndarray, List[int]]:
+def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int = 4,
+                username: Optional[str] = None, password: Optional[str] = None, retries: Optional[int] = None,
+                retry_delay: Optional[float] = None, timeout: Optional[float] = None,
+                **kwargs) -> Tuple[pd.DataFrame, np.ndarray, Dict[int, str]]:
     """
-    Downloads XP spectra for a list of source IDs in chunks, in parallel threads
+    Downloads XP spectra for a list of source IDs in chunks, in parallel threads, and calibrates them with GaiaXPy
 
     Parameters
     ----------
     xpids: List[int]
         List of Gaia DR3 Source IDs
-    chunksize: int
-        Number of source IDs per archive request
+    chunksize: Optional[int]
+        Number of source IDs per archive request (default: 50 anonymous, 1000 logged in)
     workers: int
-        Number of parallel archive requests
+        Number of parallel archive requests (at most 5 when logged in)
+    username: Optional[str]
+        Cosmos username, None for anonymous
+    password: Optional[str]
+        Cosmos password
+    retries: Optional[int]
+        Retries of a request after a server-side failure (default: 3)
+    retry_delay: Optional[float]
+        Seconds to wait before the first retry, doubled for each one after (default: 30)
+    timeout: Optional[float]
+        Seconds without a response before a connection is given up (default: 900)
     kwargs
         To be passed to the calibrate function
 
@@ -346,8 +599,8 @@ def download_xp(xpids: List[int], chunksize: int = 50, workers: int = 4,
         The source_id, flux and flux_error of each spectrum found
     wave: np.ndarray
         The wavelength [nm] of each sample, ascending
-    failed: List[int]
-        The source IDs with no spectrum returned
+    failed: Dict[int, str]
+        The source IDs with no spectrum, with the reason
     """
     xpids = list(dict.fromkeys(int(xid) for xid in xpids))  # unique, keeping order
     if not xpids:
@@ -355,22 +608,45 @@ def download_xp(xpids: List[int], chunksize: int = 50, workers: int = 4,
     wave, gaiaxpy_sampling = get_sampling(kwargs.get('sampling', None), kwargs.get('uncalibrated', False),
                                           kwargs.get('xp', 'RP'))
     kwargs['sampling'] = gaiaxpy_sampling
+    if chunksize is None:
+        chunksize = LOGGED_IN_CHUNKSIZE if username else ANONYMOUS_CHUNKSIZE
     chunksize = max(int(chunksize), 1)
+    if username and workers > LOGGED_IN_MAX_WORKERS:
+        log.warning(f'The Gaia archive allows {LOGGED_IN_MAX_WORKERS} active jobs per user, '
+                    f'using {LOGGED_IN_MAX_WORKERS} workers')
+        workers = LOGGED_IN_MAX_WORKERS
     xchunk = [xpids[i:i + chunksize] for i in range(0, len(xpids), chunksize)]  # chunk up the list of IDs
     workers = max(min(int(workers), len(xchunk)), 1)
-    log.info(f'{len(xpids)} sources in {len(xchunk)} chunks of up to {chunksize}, using {workers} workers')
-    res, samplings = [], []
-    limit = {}  # filled in when the archive reports its maximum number of source IDs per request
-    with tqdm(total=len(xpids), desc='Downloading XP spectra', unit='source', file=sys.stderr) as pbar:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_bisect, chunk, pbar, limit, **kwargs) for chunk in xchunk]
-            for future in as_completed(futures):
-                chunkres, chunksamp = future.result()
-                res.extend(chunkres)
-                samplings.extend(chunksamp)
+    log.info(f'{len(xpids)} sources in {len(xchunk)} chunks of up to {chunksize}, using {workers} workers, '
+             f'{"logged in as " + username if username else "anonymously"}')
+    archive = Archive(username, password, RETRIES if retries is None else retries,
+                      RETRY_DELAY if retry_delay is None else retry_delay)
+    state = dict(limit=None, exhausted=0, abort=None, lock=threading.Lock())
+    res, samplings, failed = [], [], {}
+    oldtimeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(TIMEOUT if timeout is None else timeout)  # astroquery connections have no timeout
+    try:
+        with tqdm(total=len(xpids), desc='Downloading XP spectra', unit='source', file=sys.stderr) as pbar:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [pool.submit(_process, chunk, archive, state, pbar, **kwargs) for chunk in xchunk]
+                for future in as_completed(futures):
+                    chunkres, chunksamp, chunkfailed = future.result()
+                    res.extend(chunkres)
+                    samplings.extend(chunksamp)
+                    failed.update(chunkfailed)
+    finally:
+        socket.setdefaulttimeout(oldtimeout)
+    if state['abort']:
+        log.error(state['abort'])
     res = [caldf for caldf in res if len(caldf)]  # make a list of the successful calibrations
     if not res:
-        raise ValueError('All batches failed')
+        if state['abort']:
+            raise ArchiveUnavailable(state['abort'])
+        reasons = list(failed.values())
+        summary = ', '.join(f'{reasons.count(reason)} {reason}' for reason in sorted(set(reasons)))
+        if any(reason in INCOMPLETE for reason in reasons):
+            raise ArchiveError(f'No XP spectra downloaded, {summary}')
+        raise ValueError(f'No XP spectra found, {summary}')
     stackdf = pd.concat(res, ignore_index=True).drop_duplicates(subset='source_id')
     if wave is None:  # calibrate with default sampling, only known now
         wave = np.asarray(samplings[0], dtype=float)
@@ -380,11 +656,11 @@ def download_xp(xpids: List[int], chunksize: int = 50, workers: int = 4,
         for col in ('flux', 'flux_error'):
             stackdf[col] = [np.asarray(arr)[order] for arr in stackdf[col]]
     found = set(stackdf.source_id.astype(np.int64))
-    failed = [xid for xid in xpids if xid not in found]
+    failed = {xid: failed.get(xid, DOWNLOAD_FAILED) for xid in xpids if xid not in found}  # input order
     return stackdf, wave, failed
 
 
-def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[List[int]] = None, **kwargs):
+def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[int, str]] = None, **kwargs):
     """
     Saves the found XP spectra, always to two csvs (full and cut - to those with spectra only)
 
@@ -396,8 +672,8 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[List[i
         The input csv name
     wave: np.ndarray
         The wavelength [nm] of each sample
-    failed: Optional[List[int]]
-        The source IDs with no spectrum returned, saved to a third csv
+    failed: Optional[Dict[int, str]]
+        The source IDs with no spectrum, with the reason, saved to a third csv
     kwargs
         Contains the name of the source ID column plus name of object name column (e.g. shortname)
         and the outputstyle (fits or txt)
@@ -418,7 +694,8 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[List[i
         df.to_csv(fnameout, index=False)
         dfcut.to_csv(fnamecut, index=False)
     if failed:
-        pd.DataFrame({'source_id': failed}).to_csv(fnamefail, index=False)
+        pd.DataFrame({'source_id': list(failed.keys()), 'reason': list(failed.values())}).to_csv(fnamefail,
+                                                                                               index=False)
     elif os.path.exists(fnamefail):
         os.remove(fnamefail)
 
@@ -436,12 +713,16 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[List[i
         if outputstyle == 'txt':
             np.savetxt(objpath + '.txt', arr, header=f'wave[nm] flux[{fluxunit}] fluxerror[{fluxunit}]')
         elif outputstyle == 'fits':
-            t = Table(arr, names=('wave', 'flux', 'fluxerror'), units=('nm', fluxunit, fluxunit))
+            t = Table(arr, names=('wave', 'flux', 'fluxerror'),
+                      units=('nm', None, None) if uncalibrated else ('nm', fluxunit, fluxunit))
             t.meta['SOURCEID'] = int(row.source_id)
             t.meta['OBJECT'] = objname
             t.meta['XPMODE'] = f'convert {xp}' if uncalibrated else 'calibrate'
             t.meta['GAIAXPY'] = gaiaxpy.__version__
-            t.write(objpath + '.fits', overwrite=True)
+            hdu = fits.table_to_hdu(t)
+            if uncalibrated:  # electron is not a FITS standard unit, which astropy would silently drop
+                hdu.header['TUNIT2'] = hdu.header['TUNIT3'] = fluxunit
+            hdu.writeto(objpath + '.fits', overwrite=True)
     return
 
 
@@ -454,14 +735,15 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
     fname: str
         The input csv name
     kwargs
-        Keyword arguments for the calibrate function (sampling, truncate, uncalibrated, xp, username, password,
-        anonymous), the download (chunksize, workers), column names (idcolname, namecol) and output styling
-        (outputstyle)
+        Keyword arguments for the calibrate function (sampling, truncate, uncalibrated, xp), the download
+        (username, password, anonymous, chunksize, workers, retries, retry_delay, timeout),
+        column names (idcolname, namecol) and output styling (outputstyle)
 
     Returns
     -------
     combdf: pd.DataFrame
-        The full csv as given, with newly added flux and flux_error columns
+        The full csv as given, with newly added flux and flux_error columns.
+        combdf.attrs['incomplete'] is the number of sources that could not be downloaded (worth trying again later)
     """
     if not fname.endswith('.csv'):
         raise ValueError('Input file must be a csv')
@@ -472,15 +754,22 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
     df = pd.read_csv(fname)
     df[idcolname] = pd.to_numeric(df[idcolname], errors='coerce').astype('Int64')
     xpids = df[idcolname].dropna().tolist()
-    stackdf, wave, failed = download_xp(xpids, kwargs.pop('chunksize', 50), kwargs.pop('workers', 4), **kwargs)
+    stackdf, wave, failed = download_xp(xpids, **kwargs)
     stackdf = stackdf.astype({'source_id': 'Int64'})
     if idcolname == 'source_id':
         combdf = pd.merge(df, stackdf, on='source_id', how='left')
     else:
         combdf = pd.merge(df, stackdf, left_on=idcolname, right_on='source_id', how='left',
                           suffixes=('', '_xp'))
-    log.warning(f'{len(stackdf)} of {len(stackdf) + len(failed)} sources have XP spectra')
+    reasons = list(failed.values())
+    summary = ''.join(f', {reasons.count(reason)} {reason}' for reason in sorted(set(reasons)))
+    log.warning(f'{len(stackdf)} of {len(stackdf) + len(failed)} sources have XP spectra{summary}')
     save(combdf, fname, wave, failed, **kwargs)
+    combdf.attrs['incomplete'] = sum(reason in INCOMPLETE for reason in reasons)
+    if combdf.attrs['incomplete']:
+        fnamefail = fname.replace('.csv', '_XP_spectra_failed.csv')
+        log.error(f'{combdf.attrs["incomplete"]} sources could not be downloaded, try them again later with '
+                  f'-f {fnamefail} (the reason column says which)')
     return combdf
 
 
@@ -492,13 +781,19 @@ def main(argv: Optional[List[str]] = None):
     kwargs = dict(sampling=args.sampling, truncate=args.truncate,
                   outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol,
                   uncalibrated=args.uncalibrated, xp=args.xp, chunksize=args.chunksize, workers=args.workers,
-                  anonymous=args.anonymous)
+                  anonymous=args.anonymous, retries=args.retries, retry_delay=args.retry_delay, timeout=args.timeout)
     kwargs['username'], kwargs['password'] = get_credentials(anonymous=args.anonymous)  # prompt before hiding stdout
     logging.basicConfig(format='%(levelname)s: %(message)s', level='INFO' if args.verbose else 'WARNING')
     astroquery_log.setLevel('INFO' if args.verbose else 'ERROR')
     # GaiaXPy prints its own messages and progress bars to stdout, hide them unless verbose
     with nullcontext() if args.verbose else redirect_stdout(StringIO()):
-        batch(args.filename, **kwargs)
+        try:
+            combdf = batch(args.filename, **kwargs)
+        except ArchiveError as e:
+            log.error(f'Nothing downloaded: {e}')
+            sys.exit(2)
+    if combdf.attrs.get('incomplete'):
+        sys.exit(1)
     return
 
 
