@@ -13,6 +13,7 @@ from getpass import getpass
 from io import StringIO
 import logging
 import os
+import re
 import sys
 from typing import List, Optional, Tuple
 
@@ -33,7 +34,8 @@ DEFAULT_PWL = np.linspace(0, 60, 600)  # default pseudo-wavelength sampling of g
 WL_LIMITS = (330., 1050.)  # absolute wavelength [nm] limits accepted by gaiaxpy.calibrate
 PWL_LIMITS = (-10., 70.)  # pseudo-wavelength limits accepted by gaiaxpy.convert
 NO_DATA_MESSAGE = 'No continuous BP/RP data found'  # raised by GaiaXPy when no source in a request has XP spectra
-FATAL_ERRORS = (AttributeError, ImportError, NameError, TypeError)  # bugs, not archive failures: no point retrying
+LIMIT_PATTERN = re.compile(r'Maximum number of Source Ids reached \(max: (\d+)')  # archive's request size error
+FATAL_ERRORS =(AttributeError, ImportError, NameError, TypeError)  # bugs, not archive failures: no point retrying
 
 
 def parse_sampling(func: str, start: float, end: float, step: float) -> np.ndarray:
@@ -236,9 +238,10 @@ def calibrate_wrap(idlist: List[int], **kwargs) -> Tuple[pd.DataFrame, np.ndarra
     return dfout[['source_id', 'flux', 'flux_error']], sampling
 
 
-def _bisect(idlist: List[int], pbar: tqdm, **kwargs) -> Tuple[List[pd.DataFrame], List[np.ndarray]]:
+def _split(idlist: List[int], pbar: tqdm, limit: dict, size: int,
+           **kwargs) -> Tuple[List[pd.DataFrame], List[np.ndarray]]:
     """
-    Tries a chunk of source IDs, splitting it in half and retrying each half on failure
+    Splits a chunk of source IDs into pieces of a given size and tries each piece
 
     Parameters
     ----------
@@ -246,6 +249,10 @@ def _bisect(idlist: List[int], pbar: tqdm, **kwargs) -> Tuple[List[pd.DataFrame]
         List of Gaia DR3 Source IDs
     pbar: tqdm
         The progress bar, updated with the number of source IDs finished
+    limit: dict
+        The archive's maximum number of source IDs per request (key 'max'), shared between threads
+    size: int
+        The size of each piece
     kwargs
         To be passed to the calibrate function
 
@@ -256,6 +263,41 @@ def _bisect(idlist: List[int], pbar: tqdm, **kwargs) -> Tuple[List[pd.DataFrame]
     samplings: List[np.ndarray]
         The sampling of each success
     """
+    res, samplings = [], []
+    for i in range(0, len(idlist), size):
+        pieceres, piecesamp = _bisect(idlist[i:i + size], pbar, limit, **kwargs)
+        res.extend(pieceres)
+        samplings.extend(piecesamp)
+    return res, samplings
+
+
+def _bisect(idlist: List[int], pbar: tqdm, limit: dict, **kwargs) -> Tuple[List[pd.DataFrame], List[np.ndarray]]:
+    """
+    Tries a chunk of source IDs, splitting it in half and retrying each half on failure.
+    If the archive says the chunk is too large, the chunk is split to the archive's limit instead,
+    and the limit is kept for the other chunks
+
+    Parameters
+    ----------
+    idlist: List[int]
+        List of Gaia DR3 Source IDs
+    pbar: tqdm
+        The progress bar, updated with the number of source IDs finished
+    limit: dict
+        The archive's maximum number of source IDs per request (key 'max'), shared between threads
+    kwargs
+        To be passed to the calibrate function
+
+    Returns
+    -------
+    res: List[pd.DataFrame]
+        The successful spectra
+    samplings: List[np.ndarray]
+        The sampling of each success
+    """
+    maxids = limit.get('max')
+    if maxids is not None and len(idlist) > maxids:
+        return _split(idlist, pbar, limit, maxids, **kwargs)
     try:
         dfout, sampling = calibrate_wrap(idlist, **kwargs)
     except FATAL_ERRORS:
@@ -265,14 +307,18 @@ def _bisect(idlist: List[int], pbar: tqdm, **kwargs) -> Tuple[List[pd.DataFrame]
             log.info(f'No XP spectra for {len(idlist)} sources starting {idlist[0]}')
             pbar.update(len(idlist))
             return [], []
+        toomany = LIMIT_PATTERN.search(str(e))
+        if toomany and int(toomany.group(1)) < len(idlist):
+            maxids = int(toomany.group(1))
+            if limit.get('max') != maxids:
+                limit['max'] = maxids
+                log.warning(f'The Gaia archive allows {maxids} source IDs per request, using chunks of {maxids}')
+            return _split(idlist, pbar, limit, maxids, **kwargs)
         log.info(f'Chunk of {len(idlist)} sources starting {idlist[0]} failed: {e!r}')
         if len(idlist) == 1:
             pbar.update(1)
             return [], []
-        half = len(idlist) // 2
-        res1, samp1 = _bisect(idlist[:half], pbar, **kwargs)
-        res2, samp2 = _bisect(idlist[half:], pbar, **kwargs)
-        return res1 + res2, samp1 + samp2
+        return _split(idlist, pbar, limit, (len(idlist) + 1) // 2, **kwargs)
     pbar.update(len(idlist))
     return [dfout, ], [sampling, ]
 
@@ -313,9 +359,10 @@ def download_xp(xpids: List[int], chunksize: int = 1000, workers: int = 4,
     workers = max(min(int(workers), len(xchunk)), 1)
     log.info(f'{len(xpids)} sources in {len(xchunk)} chunks of up to {chunksize}, using {workers} workers')
     res, samplings = [], []
+    limit = {}  # filled in when the archive reports its maximum number of source IDs per request
     with tqdm(total=len(xpids), desc='Downloading XP spectra', unit='source', file=sys.stderr) as pbar:
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_bisect, chunk, pbar, **kwargs) for chunk in xchunk]
+            futures = [pool.submit(_bisect, chunk, pbar, limit, **kwargs) for chunk in xchunk]
             for future in as_completed(futures):
                 chunkres, chunksamp = future.result()
                 res.extend(chunkres)

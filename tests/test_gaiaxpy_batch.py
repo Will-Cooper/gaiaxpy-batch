@@ -20,12 +20,16 @@ DEFAULT_WAVE = np.arange(336., 1021., 2.)  # gaiaxpy.calibrate default sampling
 class FakeArchive:
     """Stands in for gaiaxpy.calibrate and gaiaxpy.convert, counting the requests made"""
 
-    def __init__(self, error=ConnectionError):
+    def __init__(self, error=ConnectionError, maxids=None):
         self.calls = []
         self.error = error
+        self.maxids = maxids
 
     def _check(self, idlist):
         self.calls.append(list(idlist))
+        if self.maxids is not None and len(idlist) > self.maxids:  # as the archive responds since October 2026
+            raise OSError(f'Error 500:\nMaximum number of Source Ids reached (max: {self.maxids}, '
+                          f'found: {len(idlist)})\n\nCannot process request')
         if BAD in idlist:
             raise self.error('archive timeout')
         good = [xid for xid in idlist if not 800 <= xid < 900]  # 800-899 have no XP spectra
@@ -93,6 +97,16 @@ def test_no_data_not_bisected(archive):
     assert failed == [801, 802] and len(archive.calls) == 2  # the chunk with no XP spectra is not split
     with pytest.raises(ValueError, match='All batches failed'):
         gb.download_xp([NOXP])
+
+
+def test_archive_limit(monkeypatch):
+    fake = FakeArchive(maxids=3)
+    monkeypatch.setattr(gb, 'calibrate', fake.calibrate)
+    ids = list(range(1, 21)) + [BAD]
+    stackdf, wave, failed = gb.download_xp(ids, chunksize=10, workers=1)
+    assert failed == [BAD] and sorted(stackdf.source_id) == list(range(1, 21))
+    assert all(len(call) <= 3 for call in fake.calls[1:])  # only the first request is too large
+    assert len(fake.calls) <= 1 + 7 + 2  # one rejection, then chunks of 3, plus bisecting the bad chunk
 
 
 def test_fatal_error_not_retried(monkeypatch):
