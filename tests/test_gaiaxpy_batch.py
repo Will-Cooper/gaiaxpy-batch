@@ -67,7 +67,7 @@ def test_parse_sampling():
 
 def test_sysargs():
     args = gb.sysargs(['-f', 'a.csv', '-s', 'linspace', '600', '1000', '50', '-x', 'bp', '-u'])
-    assert len(args.sampling) == 50 and args.xp == 'BP' and args.namecol is None and args.chunksize == 1000
+    assert len(args.sampling) == 50 and args.xp == 'BP' and args.namecol is None and args.chunksize == 50
 
 
 def test_get_sampling():

@@ -4,7 +4,8 @@ Batch downloading of Gaia DR3 XP spectra through GaiaXPy.
 
 GaiaXPy sends every source ID it is given to the Gaia archive in a single DataLink request.
 This script splits a large list of source IDs into chunks, downloads the chunks in parallel threads,
-retries failed chunks by splitting them in half, and saves the spectra to csv and (optionally) per-object fits/txt files.
+retries failed chunks by splitting them in half, and saves the spectra to csv and (optionally) per-object
+fits/txt files.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -100,8 +101,8 @@ def sysargs(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help='Switch to uncalibrated spectra mode?')
     _args.add_argument('-x', '--xp', dest='xp', default='RP', type=str.upper, choices=('BP', 'RP'),
                        help='If in uncalibrated mode, RP or BP? (default: RP)')
-    _args.add_argument('-c', '--chunksize', dest='chunksize', default=1000, type=int,
-                       help='Number of source IDs per archive request (default: 1000)')
+    _args.add_argument('-c', '--chunksize', dest='chunksize', default=50, type=int,
+                       help='Number of source IDs per archive request (default: 50, the anonymous archive limit)')
     _args.add_argument('-w', '--workers', dest='workers', default=4, type=int,
                        help='Number of parallel archive requests (default: 4)')
     _args.add_argument('-a', '--anonymous', dest='anonymous', default=False, action='store_true',
@@ -323,7 +324,7 @@ def _bisect(idlist: List[int], pbar: tqdm, limit: dict, **kwargs) -> Tuple[List[
     return [dfout, ], [sampling, ]
 
 
-def download_xp(xpids: List[int], chunksize: int = 1000, workers: int = 4,
+def download_xp(xpids: List[int], chunksize: int = 50, workers: int = 4,
                 **kwargs) -> Tuple[pd.DataFrame, np.ndarray, List[int]]:
     """
     Downloads XP spectra for a list of source IDs in chunks, in parallel threads
@@ -471,7 +472,7 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
     df = pd.read_csv(fname)
     df[idcolname] = pd.to_numeric(df[idcolname], errors='coerce').astype('Int64')
     xpids = df[idcolname].dropna().tolist()
-    stackdf, wave, failed = download_xp(xpids, kwargs.pop('chunksize', 1000), kwargs.pop('workers', 4), **kwargs)
+    stackdf, wave, failed = download_xp(xpids, kwargs.pop('chunksize', 50), kwargs.pop('workers', 4), **kwargs)
     stackdf = stackdf.astype({'source_id': 'Int64'})
     if idcolname == 'source_id':
         combdf = pd.merge(df, stackdf, on='source_id', how='left')

@@ -1,5 +1,5 @@
 # GaiaXPy - Batch
-A convenience script for submitting lots (>1000) of Gaia DR3
+A convenience script for submitting lots (>50) of Gaia DR3
 source IDs through the `gaiaxpy.calibrate` or `gaiaxpy.convert` function
 (but it can handle any number).
 It allows one to download the spectra directly to
@@ -13,7 +13,7 @@ for anonymous users, a request with more than 50 source IDs is rejected
 ("Maximum number of Source Ids reached (max: 50, ...)", tested on 2026-10-20).
 So GaiaXPy alone cannot retrieve more than 50 sources at once anonymously, and one failure loses the whole list.
 This script:
-* splits the list into chunks (default 1000 source IDs) and downloads them in parallel (default 4 workers),
+* splits the list into chunks (default 50 source IDs, the anonymous limit) and downloads them in parallel (default 4 workers),
 * when the archive reports its maximum number of source IDs per request, splits all chunks to that size,
 * splits otherwise failed chunks in half and retries them, down to single source IDs,
 * records the source IDs without spectra in a separate csv,
@@ -86,7 +86,7 @@ options:
   -u, --uncalibrated    Switch to uncalibrated spectra mode?
   -x, --xp {BP,RP}      If in uncalibrated mode, RP or BP? (default: RP)
   -c, --chunksize CHUNKSIZE
-                        Number of source IDs per archive request (default: 1000)
+                        Number of source IDs per archive request (default: 50, the anonymous archive limit)
   -w, --workers WORKERS
                         Number of parallel archive requests (default: 4)
   -a, --anonymous       Query the archive without logging in (otherwise uses $GAIA_USERNAME and
