@@ -1,0 +1,9 @@
+# requirements.txt plus the exact versions of the test and lint tools
+-r requirements.txt
+coverage==7.17.0
+iniconfig==2.3.1
+pluggy==1.7.0
+Pygments==2.21.0
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.17.1
