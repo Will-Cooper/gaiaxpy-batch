@@ -243,7 +243,8 @@ def test_login_failure_stops(monkeypatch):
 def test_expired_session_logs_in_again(monkeypatch):
     server, _ = install(monkeypatch, FakeServer(expire=1))
     start = time.monotonic()
-    stackdf, wave, failed = gb.download_xp([1, 2], username='me', password='pw', retry_delay=100)
+    # one worker, so the logins are its first and the one after the expiry, whatever the thread timing
+    stackdf, wave, failed = gb.download_xp([1, 2], username='me', password='pw', retry_delay=100, workers=1)
     assert failed == {} and server.logins == 2
     assert time.monotonic() - start < 10  # logged in again straight away, not after the 100 s retry delay
 
@@ -438,6 +439,25 @@ def test_validate_read_only_output(tmp_path):
             gb.validate_inputs(str(fname))
     finally:
         tmp_path.chmod(0o700)
+
+
+def test_partial_spectra_warned(monkeypatch, tmp_path, caplog):
+    gaiaxpy = FakeGaiaXPy()
+    real = gaiaxpy.calibrate
+
+    def rp_only(coeffs, sampling=None, **kwargs):  # source 2 has only an RP spectrum: NaN in the blue
+        df, sampling = real(coeffs, sampling, **kwargs)
+        df['flux'] = [np.where(sampling < 640, np.nan, f) if xid == 2 else f for xid, f in zip(df.source_id, df.flux)]
+        return df, sampling
+
+    gaiaxpy.calibrate = rp_only
+    install(monkeypatch, gaiaxpy=gaiaxpy)
+    monkeypatch.setattr(gb.log, 'propagate', True)
+    fname = tmp_path / 'ids.csv'
+    fname.write_text('source_id\n1\n2\n3\n')
+    combdf = gb.batch(str(fname), anonymous=True)
+    assert combdf.flux.notna().all() and combdf.attrs['incomplete'] == 0  # still successes
+    assert '1 of the spectra are partial' in caplog.text
 
 
 def test_x_without_u_warns(archive, tmp_path, monkeypatch, caplog):

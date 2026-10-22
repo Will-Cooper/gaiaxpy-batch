@@ -935,7 +935,9 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
         examples = ', '.join(repr(value) for value in list(invalid)[:3])
         hint = (' (written in scientific notation, e.g. by a spreadsheet, so digits have been lost)'
                 if any('e+' in value.lower() for value in invalid) else '')
-        log.warning(f'{ids.isna().sum()} rows have no valid Gaia DR3 source ID{hint}, e.g. {examples}')
+        nrows = int(ids.isna().sum())
+        log.warning(f'{nrows} row{"s have" if nrows > 1 else " has"} no valid Gaia DR3 source ID{hint}, '
+                    f'e.g. {examples}')
     df[idcolname] = ids
     if ids.isna().all():
         raise ValueError(f'No valid Gaia DR3 source IDs in column {idcolname!r} of {fname}')
@@ -946,6 +948,11 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
     reasons = list(failed.values())
     summary = ''.join(f', {reasons.count(reason)} {reason}' for reason in sorted(set(reasons)))
     log.info(f'{len(stackdf)} of {len(stackdf) + len(failed)} sources have XP spectra{summary}')
+    partial = int(sum(np.isnan(np.asarray(flux, dtype=float)).any() for flux in stackdf.flux))
+    if partial:  # e.g. calibrated spectra of sources with only an RP spectrum are NaN below about 640 nm
+        log.warning(f'{partial} of the spectra are partial, NaN where a band is missing (e.g. below about 640 nm '
+                    f'for sources with only an RP spectrum, as for many very red sources): check for NaNs before '
+                    f'integrating or fitting them')
     save(combdf, fname, wave, failed, **kwargs)
     combdf.attrs['incomplete'] = sum(reason in INCOMPLETE for reason in reasons)
     if combdf.attrs['incomplete']:

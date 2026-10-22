@@ -166,8 +166,11 @@ For an input `mysourceids.csv`, next to it:
   (GaiaXPy's default), and uncalibrated ones at pseudo-wavelengths 0 to 60 (converted to nm).
 * **Fluxes** are in W m<sup>-2</sup> nm<sup>-1</sup> (calibrated) or electron s<sup>-1</sup> (uncalibrated, `-u`).
   `electron/s` is not a standard FITS unit, so astropy warns when reading it.
-* A calibrated spectrum is NaN (not a number) where a band is missing, e.g. below about 640 nm for a source with
-  only an RP spectrum.
+* **Partial spectra:** a calibrated spectrum is NaN (not a number) where a band is missing, e.g. below about 640 nm
+  (roughly 44 per cent of the default grid) for a source with only an RP spectrum, which is common for very red
+  sources such as ultracool dwarfs. These still count as successes; the script warns how many there are.
+  **Check for NaNs before integrating or fitting a spectrum** (e.g. `numpy.isfinite(flux)`), or functions such as
+  `numpy.trapezoid` will return NaN.
 * The wiggles in XP spectra are real: they come from the functions the spectra are made of, and are strongest in
   faint sources and at the blue end. Truncation (`-t`) smooths them.
 * The fits files have the header keywords `SOURCEID`, `OBJECT`, `XPMODE` (calibrate, or convert BP/RP) and
@@ -279,6 +282,8 @@ this script will be updated once GaiaXPy supports DR4.
   `environment.yml` installs them; `pyproject.toml` has the looser ranges used by `pip install .`.
   To regenerate the pins, in a fresh Python 3.12 environment run `python -m pip install . && python -m pip freeze --exclude-editable`
   and drop gaiaxpy-batch, pip, setuptools and wheel.
+  If your conda adds packages to every new environment (`conda config --show create_default_packages`),
+  `conda env create` adds them here too; the pinned versions are still the ones installed.
 * Tests (the archive and GaiaXPy are mocked, except for the network test):
   ```bash
   python -m pytest --cov=gaiaxpy_batch       # offline
