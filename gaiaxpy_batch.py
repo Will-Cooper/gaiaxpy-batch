@@ -9,6 +9,7 @@ retries server-side failures with increasing waits, and passes the downloaded co
 The spectra are saved to csv and (optionally) per-object fits/txt files.
 """
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
 from contextlib import redirect_stdout
 from getpass import getpass
@@ -16,10 +17,12 @@ from io import StringIO
 import logging
 import os
 import re
+import shutil
 import socket
 import sys
+import tempfile
 import threading
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from astropy.io import fits
 from astropy.table import Table
@@ -50,6 +53,8 @@ RETRY_DELAY = 30.  # seconds to wait before the first retry, doubled for each on
 TIMEOUT = 900.  # seconds without a response before a connection is given up
 ABORT_AFTER = 3  # chunks in a row failing every retry before the archive is taken to be unavailable
 
+ID_PATTERN = re.compile(r'^\s*(?:Gaia\s*)?(?:DR3\s*)?(\d{1,19})\s*$', re.IGNORECASE)  # 123 or Gaia DR3 123
+UNSAFE_PATTERN = re.compile(r'[^\w.+-]+')  # characters replaced by _ in file names
 LIMIT_PATTERN = re.compile(r'Maximum number of Source Ids reached \(max: (\d+)')  # archive's request size error
 STATUS_PATTERN = re.compile(r'\b(?:HTTP Error|Error|status code)\s*:?\s*(\d{3})\b', re.IGNORECASE)
 FATAL_ERRORS = (AttributeError, ImportError, NameError, TypeError)  # bugs, not archive failures: no point retrying
@@ -59,6 +64,7 @@ NO_XP = 'no XP spectrum'
 DOWNLOAD_FAILED = 'download failed'
 NOT_ATTEMPTED = 'not attempted'  # the downloads were stopped (archive unavailable, or interrupted)
 CALIBRATION_FAILED = 'calibration failed'
+INVALID_ID = 'invalid source ID'
 INCOMPLETE = (DOWNLOAD_FAILED, NOT_ATTEMPTED)  # reasons worth trying again later
 
 
@@ -111,8 +117,9 @@ def sysargs(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        metavar=('numpy function', 'start', 'end', 'step'),
                        help='Wavelength [absolute nm] sampling to be retrieved, e.g. "linspace 600 1050 120" '
                             f'(functions: {", ".join(SAMPLING_FUNCTIONS)})')
-    _args.add_argument('-t', '--truncate', dest='truncate', help='Truncate set of bases?', default=False,
-                       action='store_true')
+    _args.add_argument('-t', '--truncate', dest='truncate', default=False, action='store_true',
+                       help='Use only the basis functions GaiaXPy recommends for each source (smoother, less noisy '
+                            'spectra)')
     _args.add_argument('-o', '--outputstyle', dest='outputstyle', choices=('fits', 'txt'), default=None,
                        help='Output of produced spectra (default: None)')
     _args.add_argument('-i', '--idcolname', dest='idcolname', help='Name of the column relating to DR3 Source ID',
@@ -121,9 +128,10 @@ def sysargs(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help='Name of the column relating to the object name (for saving spectra, '
                             'default: GaiaDR3_<source_id>)')
     _args.add_argument('-u', '--uncalibrated', dest='uncalibrated', action='store_true', default=False,
-                       help='Switch to uncalibrated spectra mode?')
-    _args.add_argument('-x', '--xp', dest='xp', default='RP', type=str.upper, choices=('BP', 'RP'),
-                       help='If in uncalibrated mode, RP or BP? (default: RP)')
+                       help='Get the internally calibrated BP or RP spectrum (gaiaxpy.convert, electron/s) '
+                            'instead of the calibrated one (gaiaxpy.calibrate, W m-2 nm-1)')
+    _args.add_argument('-x', '--xp', dest='xp', default=None, type=str.upper, choices=('BP', 'RP'),
+                       help='With -u, which spectrum: BP or RP (default: RP)')
     _args.add_argument('-c', '--chunksize', dest='chunksize', default=None, type=int,
                        help=f'Number of source IDs per archive request (default: {ANONYMOUS_CHUNKSIZE} anonymous, '
                             f'{LOGGED_IN_CHUNKSIZE} logged in; the archive allows up to 50 and 5000)')
@@ -141,7 +149,7 @@ def sysargs(argv: Optional[List[str]] = None) -> argparse.Namespace:
                        help='Query the archive without logging in (otherwise uses $GAIA_USERNAME and '
                             '$GAIA_PASSWORD, or prompts)')
     _args.add_argument('-v', '--verbose', dest='verbose', default=False, action='store_true',
-                       help='Print failure errors?')
+                       help='Print details of every request, login and failure')
     _args.add_argument('--version', action='version', version=f'%(prog)s {__version__} (GaiaXPy {gaiaxpy.__version__})')
     _args = _args.parse_args(argv)
     if _args.sampling is not None:
@@ -187,8 +195,12 @@ def get_credentials(username: Optional[str] = None, password: Optional[str] = No
     """
     if anonymous:
         return None, None
-    username = username or os.environ.get('GAIA_USERNAME') or input('Gaia archive username: ')
-    password = password or os.environ.get('GAIA_PASSWORD') or getpass('Gaia archive password: ')
+    try:
+        username = username or os.environ.get('GAIA_USERNAME') or input('Gaia archive username: ')
+        password = password or os.environ.get('GAIA_PASSWORD') or getpass('Gaia archive password: ')
+    except (EOFError, OSError):  # no terminal to ask on, e.g. run with nohup or from a script
+        raise ValueError('No Gaia archive credentials: set GAIA_USERNAME and GAIA_PASSWORD, '
+                         'or use -a to download anonymously') from None
     return username, password
 
 
@@ -213,6 +225,8 @@ def get_sampling(sampling: Optional[np.ndarray] = None, uncalibrated: bool = Fal
     gaiaxpy_sampling: Optional[np.ndarray]
         The sampling to pass to GaiaXPy (absolute nm for calibrate, ascending pseudo-wavelength for convert)
     """
+    if sampling is not None and not len(sampling):
+        raise ValueError('The sampling has no points, e.g. arange with a step that is not positive')
     if not uncalibrated:
         if sampling is None:
             return None, None
@@ -220,9 +234,9 @@ def get_sampling(sampling: Optional[np.ndarray] = None, uncalibrated: bool = Fal
         if np.any(np.diff(wave) <= 0) or wave[0] < WL_LIMITS[0] or wave[-1] > WL_LIMITS[1]:
             raise ValueError(f'Sampling must be ascending and within {WL_LIMITS[0]:.0f}-{WL_LIMITS[1]:.0f} nm')
         return wave, wave
-    xp = xp.upper()
+    xp = (xp or 'RP').upper()
     if xp not in ('BP', 'RP'):
-        raise ValueError('Needs to be BP or RP for dispersion')
+        raise ValueError(f'The spectrum must be BP or RP, not {xp!r}')
     if sampling is None:
         pwl = DEFAULT_PWL.copy()
         wave = pwl_to_wl(xp, pwl)
@@ -258,7 +272,7 @@ def calibrate_wrap(coeffs: pd.DataFrame, **kwargs) -> Tuple[pd.DataFrame, np.nda
     sampling = kwargs.get('sampling', None)
     truncate = kwargs.get('truncate', False)
     uncalibrated = kwargs.get('uncalibrated', False)
-    xp = kwargs.get('xp', 'RP').upper()
+    xp = (kwargs.get('xp') or 'RP').upper()
     if not uncalibrated:
         dfout, sampling = calibrate(coeffs, sampling=sampling, truncation=truncate, save_file=False)
     else:
@@ -483,11 +497,25 @@ def _calibrate_rows(coeffs: pd.DataFrame, **kwargs) -> Results:
     except Exception as e:
         if len(coeffs) == 1:
             xid = int(coeffs.source_id.iloc[0])
-            log.info(f'Calibration of {xid} failed: {_short(e)}')
+            log.debug(f'Calibration of {xid} failed: {_short(e)}')
             return [], [], {xid: CALIBRATION_FAILED}
         half = (len(coeffs) + 1) // 2
         return _merge([_calibrate_rows(coeffs.iloc[:half], **kwargs), _calibrate_rows(coeffs.iloc[half:], **kwargs)])
-    return [dfout, ], [sampling, ], {}
+    # sources GaiaXPy returned no spectrum for: e.g. the BP spectrum of a source with only an RP one is None
+    usable = dfout.flux.map(_usable).astype(bool)
+    dfout = dfout[usable]
+    returned = set(dfout.source_id.astype(np.int64))
+    reason = f'no {(kwargs.get("xp") or "RP").upper()} spectrum' if kwargs.get('uncalibrated') else CALIBRATION_FAILED
+    failed = {int(xid): reason for xid in coeffs.source_id if int(xid) not in returned}
+    return ([dfout, ], [sampling, ], failed) if len(dfout) else ([], [], failed)
+
+
+def _usable(flux) -> bool:
+    """Whether a spectrum returned by GaiaXPy has any values (it is None for a missing band)"""
+    if flux is None:
+        return False
+    arr = np.asarray(flux, dtype=float)
+    return arr.ndim == 1 and bool(np.isfinite(arr).any())
 
 
 def _process(idlist: List[int], archive: Archive, state: dict, pbar: tqdm, **kwargs) -> Results:
@@ -554,7 +582,7 @@ def _process(idlist: List[int], archive: Archive, state: dict, pbar: tqdm, **kwa
                     log.warning(f'The Gaia archive allows {maxids} source IDs per request, using chunks of {maxids}')
             return pieces(maxids)
         # a bad request, perhaps because of one of the source IDs
-        log.info(f'Download of {len(idlist)} sources starting {idlist[0]} failed: {_short(e)}')
+        log.debug(f'Download of {len(idlist)} sources starting {idlist[0]} failed: {_short(e)}')
         if len(idlist) == 1:
             pbar.update(1)
             return [], [], {idlist[0]: DOWNLOAD_FAILED}
@@ -576,7 +604,8 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
                 retry_delay: Optional[float] = None, timeout: Optional[float] = None,
                 **kwargs) -> Tuple[pd.DataFrame, np.ndarray, Dict[int, str]]:
     """
-    Downloads XP spectra for a list of source IDs in chunks, in parallel threads, and calibrates them with GaiaXPy
+    Downloads XP spectra for a list of source IDs in chunks, in parallel threads, and calibrates them with GaiaXPy.
+    The working directory is a temporary one while downloading (astroquery writes files to it), and is restored after
 
     Parameters
     ----------
@@ -632,6 +661,11 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
     res, samplings, failed = [], [], {}
     oldtimeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(TIMEOUT if timeout is None else timeout)  # astroquery connections have no timeout
+    # astroquery writes (and deletes, unless killed) a temp_<time> directory in the working directory for every
+    # request, so work in a temporary directory instead of the user's
+    oldcwd = os.getcwd()
+    workdir = tempfile.mkdtemp(prefix='gaiaxpy_batch_')
+    os.chdir(workdir)
     collected = set()
 
     def collect(future):
@@ -666,6 +700,8 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
                 pool.shutdown(wait=False)
     finally:
         socket.setdefaulttimeout(oldtimeout)
+        os.chdir(oldcwd)
+        shutil.rmtree(workdir, ignore_errors=True)
     if state['abort']:
         log.error(state['abort'])
     res = [caldf for caldf in res if len(caldf)]  # make a list of the successful calibrations
@@ -691,7 +727,119 @@ def download_xp(xpids: List[int], chunksize: Optional[int] = None, workers: int 
     return stackdf, wave, failed
 
 
-def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[int, str]] = None, **kwargs):
+def output_names(fname: str) -> Tuple[str, str, str]:
+    """
+    The names of the output csvs for an input csv
+
+    Parameters
+    ----------
+    fname: str
+        The input csv name
+
+    Returns
+    -------
+    _: Tuple[str, str, str]
+        The full, cut (only sources with spectra) and failed csv names
+    """
+    stem = os.path.splitext(fname)[0] + '_XP_spectra'
+    return stem + '.csv', stem + '_cut.csv', stem + '_failed.csv'
+
+
+def read_ids(values: pd.Series) -> pd.Series:
+    """
+    Parses Gaia DR3 source IDs exactly, from plain integers or names such as 'Gaia DR3 123'
+
+    Parameters
+    ----------
+    values: pd.Series
+        The source ID column, read as strings (floats would lose the last digits of 19 digit source IDs)
+
+    Returns
+    -------
+    _: pd.Series
+        The source IDs (Int64), missing where the value is not a source ID
+    """
+    def parse(value):
+        match = None if pd.isna(value) else ID_PATTERN.match(str(value))
+        return int(match.group(1)) if match and int(match.group(1)) < 2 ** 63 else pd.NA
+    return pd.Series([parse(value) for value in values], index=values.index, dtype='Int64')
+
+
+def validate_inputs(fname: str, idcolname: str = 'source_id', namecol: Optional[str] = None,
+                    outputstyle: Optional[str] = None, sampling: Optional[np.ndarray] = None,
+                    uncalibrated: bool = False, xp: Optional[str] = None):
+    """
+    Checks the input csv and options before anything is downloaded, raising a ValueError (or OSError) explaining
+    the problem
+
+    Parameters
+    ----------
+    fname: str
+        The input csv name
+    idcolname: str
+        The name of the source ID column
+    namecol: Optional[str]
+        The name of the object name column
+    outputstyle: Optional[str]
+        fits, txt or None
+    sampling: Optional[np.ndarray]
+        Wavelength [absolute nm] sampling
+    uncalibrated: bool
+        Switch to uncalibrated (gaiaxpy.convert) mode
+    xp: Optional[str]
+        BP or RP, for uncalibrated mode
+    """
+    if not os.path.isfile(fname):
+        raise FileNotFoundError(f'Input file {fname} not found')
+    if os.path.splitext(fname)[1].lower() != '.csv':
+        raise ValueError(f'Input file {fname} must be a csv (comma separated values) file ending .csv')
+    columns = list(pd.read_csv(fname, nrows=0).columns)
+    for column, flag in ((idcolname, '-i'), (namecol, '-n')):
+        if column is not None and column not in columns:
+            raise ValueError(f'Column {column!r} not found in {fname}, which has the columns {columns}; '
+                             f'choose the column with {flag}')
+    if outputstyle not in (None, 'fits', 'txt'):
+        raise ValueError(f'The output style must be fits or txt, not {outputstyle!r}')
+    if xp is not None and not uncalibrated:
+        log.warning(f'-x {xp} only applies to uncalibrated (-u) spectra, calibrated spectra combine BP and RP')
+    get_sampling(sampling, uncalibrated, xp)
+    outdir = os.path.dirname(os.path.abspath(fname))
+    if not os.access(outdir, os.W_OK):
+        raise PermissionError(f'Cannot write the outputs to {outdir}, copy the input csv somewhere writable')
+
+
+def object_names(ids: pd.Series, names: Optional[pd.Series] = None) -> List[str]:
+    """
+    File names (without extension) for the per-object spectra: the object name made safe for a file name,
+    or GaiaDR3_<source_id> if there is no name. Names shared by different sources get _<source_id> added
+
+    Parameters
+    ----------
+    ids: pd.Series
+        The source IDs, one per object
+    names: Optional[pd.Series]
+        The object names, None to name every file by source ID
+
+    Returns
+    -------
+    _: List[str]
+        The file names
+    """
+    files = []
+    for i, xid in enumerate(ids):
+        name = None if names is None else names.iloc[i]
+        name = '' if name is None or pd.isna(name) else UNSAFE_PATTERN.sub('_', str(name).strip()).strip('._')
+        files.append(name or f'GaiaDR3_{int(xid)}')
+    counts = Counter(files)
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    if duplicates:
+        log.warning(f'{len(duplicates)} names are shared by several sources (e.g. {duplicates[0]}), '
+                    f'their files are named <name>_<source_id>')
+    return [f'{name}_{int(xid)}' if counts[name] > 1 else name for name, xid in zip(files, ids)]
+
+
+def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[Union[int, str], str]] = None,
+         **kwargs):
     """
     Saves the found XP spectra, always to two csvs (full and cut - to those with spectra only)
 
@@ -703,7 +851,7 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[i
         The input csv name
     wave: np.ndarray
         The wavelength [nm] of each sample
-    failed: Optional[Dict[int, str]]
+    failed: Optional[Dict[Union[int, str], str]]
         The source IDs with no spectrum, with the reason, saved to a third csv
     kwargs
         Contains the name of the source ID column plus name of object name column (e.g. shortname)
@@ -711,12 +859,10 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[i
     """
     outputstyle = kwargs.get('outputstyle', None)
     idcolname = kwargs.get('idcolname', 'source_id')
-    namecol = kwargs.get('namecol', None) or idcolname
+    namecol = kwargs.get('namecol', None)
     uncalibrated = kwargs.get('uncalibrated', False)
-    xp = kwargs.get('xp', 'RP').upper()
-    fnameout = fname.replace('.csv', '_XP_spectra.csv')
-    fnamecut = fnameout.replace('.csv', '_cut.csv')
-    fnamefail = fnameout.replace('.csv', '_failed.csv')
+    xp = (kwargs.get('xp') or 'RP').upper()
+    fnameout, fnamecut, fnamefail = output_names(fname)
     fpath = os.path.join(os.path.dirname(os.path.abspath(fname)), 'outputspectra')
 
     # saving to files, writing the full arrays rather than numpy's summarised repr
@@ -730,24 +876,23 @@ def save(df: pd.DataFrame, fname: str, wave: np.ndarray, failed: Optional[Dict[i
     elif os.path.exists(fnamefail):
         os.remove(fnamefail)
 
-    if outputstyle is None or outputstyle not in ('fits', 'txt'):
+    if outputstyle is None:
         return
     fluxunit = 'electron/s' if uncalibrated else 'W m-2 nm-1'
-    dfcutgrp = dfcut.groupby(namecol)
-    dfcutgrplen = dfcut[namecol].nunique()
+    objects = dfcut.drop_duplicates(subset=idcolname)  # a source listed twice is saved once
+    names = object_names(objects[idcolname], objects[namecol] if namecol and namecol != idcolname else None)
     os.makedirs(fpath, exist_ok=True)
-    for objname, objgrp in tqdm(dfcutgrp, total=dfcutgrplen, desc='Saving spectra to files', file=sys.stderr):
-        row = objgrp.iloc[0]
-        objname = f'GaiaDR3_{int(row.source_id)}' if namecol == idcolname else str(objname)
+    for (_, row), objname in tqdm(zip(objects.iterrows(), names), total=len(objects), desc='Saving spectra to files',
+                                  file=sys.stderr):
         objpath = os.path.join(fpath, objname)
         arr = np.array((wave, row.flux, row.flux_error)).T
         if outputstyle == 'txt':
             np.savetxt(objpath + '.txt', arr, header=f'wave[nm] flux[{fluxunit}] fluxerror[{fluxunit}]')
-        elif outputstyle == 'fits':
+        else:
             t = Table(arr, names=('wave', 'flux', 'fluxerror'),
                       units=('nm', None, None) if uncalibrated else ('nm', fluxunit, fluxunit))
-            t.meta['SOURCEID'] = int(row.source_id)
-            t.meta['OBJECT'] = objname
+            t.meta['SOURCEID'] = int(row[idcolname])
+            t.meta['OBJECT'] = str(row[namecol]) if namecol and pd.notna(row[namecol]) else objname
             t.meta['XPMODE'] = f'convert {xp}' if uncalibrated else 'calibrate'
             t.meta['GAIAXPY'] = gaiaxpy.__version__
             hdu = fits.table_to_hdu(t)
@@ -773,58 +918,80 @@ def batch(fname: str, **kwargs) -> pd.DataFrame:
     Returns
     -------
     combdf: pd.DataFrame
-        The full csv as given, with newly added flux and flux_error columns.
+        The full csv as given, with newly added flux and flux_error columns (and the source ID column as integers).
         combdf.attrs['incomplete'] is the number of sources that could not be downloaded (worth trying again later)
     """
-    if not fname.endswith('.csv'):
-        raise ValueError('Input file must be a csv')
+    fname = os.path.abspath(fname)
     idcolname = kwargs.get('idcolname', 'source_id')
+    validate_inputs(fname, idcolname, kwargs.get('namecol', None), kwargs.get('outputstyle', None),
+                    kwargs.get('sampling', None), kwargs.get('uncalibrated', False), kwargs.get('xp', None))
     kwargs['username'], kwargs['password'] = get_credentials(kwargs.get('username', None),
                                                              kwargs.get('password', None),
                                                              kwargs.get('anonymous', False))
-    df = pd.read_csv(fname)
-    df[idcolname] = pd.to_numeric(df[idcolname], errors='coerce').astype('Int64')
-    xpids = df[idcolname].dropna().tolist()
-    stackdf, wave, failed = download_xp(xpids, **kwargs)
-    stackdf = stackdf.astype({'source_id': 'Int64'})
-    if idcolname == 'source_id':
-        combdf = pd.merge(df, stackdf, on='source_id', how='left')
-    else:
-        combdf = pd.merge(df, stackdf, left_on=idcolname, right_on='source_id', how='left',
-                          suffixes=('', '_xp'))
+    df = pd.read_csv(fname, dtype={idcolname: str})  # as strings, floats would lose digits of 19 digit IDs
+    ids = read_ids(df[idcolname])
+    invalid = {'' if pd.isna(value) else str(value): INVALID_ID for value in df[idcolname][ids.isna()]}
+    if invalid:
+        examples = ', '.join(repr(value) for value in list(invalid)[:3])
+        hint = (' (written in scientific notation, e.g. by a spreadsheet, so digits have been lost)'
+                if any('e+' in value.lower() for value in invalid) else '')
+        log.warning(f'{ids.isna().sum()} rows have no valid Gaia DR3 source ID{hint}, e.g. {examples}')
+    df[idcolname] = ids
+    if ids.isna().all():
+        raise ValueError(f'No valid Gaia DR3 source IDs in column {idcolname!r} of {fname}')
+    stackdf, wave, failed = download_xp(ids.dropna().tolist(), **kwargs)
+    stackdf = stackdf.astype({'source_id': 'Int64'}).rename(columns={'source_id': idcolname})
+    combdf = pd.merge(df, stackdf, on=idcolname, how='left')
+    failed = {**failed, **invalid}
     reasons = list(failed.values())
     summary = ''.join(f', {reasons.count(reason)} {reason}' for reason in sorted(set(reasons)))
-    log.warning(f'{len(stackdf)} of {len(stackdf) + len(failed)} sources have XP spectra{summary}')
+    log.info(f'{len(stackdf)} of {len(stackdf) + len(failed)} sources have XP spectra{summary}')
     save(combdf, fname, wave, failed, **kwargs)
     combdf.attrs['incomplete'] = sum(reason in INCOMPLETE for reason in reasons)
     if combdf.attrs['incomplete']:
-        fnamefail = fname.replace('.csv', '_XP_spectra_failed.csv')
         log.error(f'{combdf.attrs["incomplete"]} sources could not be downloaded, try them again later with '
-                  f'-f {fnamefail} (the reason column says which)')
+                  f'-f {output_names(fname)[2]} (the reason column says which)')
     return combdf
+
+
+class ConsoleFormatter(logging.Formatter):
+    """Log messages as 'LEVEL: message', but plain 'message' for information"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        return message if record.levelno == logging.INFO else f'{record.levelname}: {message}'
 
 
 def main(argv: Optional[List[str]] = None):
     """
-    Main function, runs only when file run from command line using system arguments
+    Main function, runs only when file run from command line using system arguments.
+    Exits with status 0 if everything was downloaded (or has no XP spectrum), 1 if some sources could not be
+    downloaded, and 2 if nothing could be downloaded or the inputs are wrong
     """
     args = sysargs(argv)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(ConsoleFormatter())
+    log.handlers = [handler]
+    log.setLevel('DEBUG' if args.verbose else 'INFO')
+    log.propagate = False
+    astroquery_log.setLevel('INFO' if args.verbose else 'ERROR')
+    astroquery_log.propagate = False  # astroquery has its own handler, don't print its messages twice
     kwargs = dict(sampling=args.sampling, truncate=args.truncate,
                   outputstyle=args.outputstyle, idcolname=args.idcolname, namecol=args.namecol,
                   uncalibrated=args.uncalibrated, xp=args.xp, chunksize=args.chunksize, workers=args.workers,
                   anonymous=args.anonymous, retries=args.retries, retry_delay=args.retry_delay, timeout=args.timeout)
-    kwargs['username'], kwargs['password'] = get_credentials(anonymous=args.anonymous)  # prompt before hiding stdout
-    logging.basicConfig(format='%(levelname)s: %(message)s', level='INFO' if args.verbose else 'WARNING')
-    astroquery_log.setLevel('INFO' if args.verbose else 'ERROR')
-    astroquery_log.propagate = False  # astroquery has its own handler, don't print its messages twice
-    # GaiaXPy and astroquery print messages, progress bars and raw HTTP error pages to stdout, which would garble
-    # the progress bar; everything useful is logged (to stderr) anyway
-    with redirect_stdout(StringIO()):
-        try:
+    try:
+        # check the inputs, then ask for the password, before hiding stdout (which the prompts use)
+        validate_inputs(args.filename, args.idcolname, args.namecol, args.outputstyle, args.sampling,
+                        args.uncalibrated, args.xp)
+        kwargs['username'], kwargs['password'] = get_credentials(anonymous=args.anonymous)
+        # GaiaXPy and astroquery print messages, progress bars and raw HTTP error pages to stdout, which would
+        # garble the progress bar; everything useful is logged (to stderr) anyway
+        with redirect_stdout(StringIO()):
             combdf = batch(args.filename, **kwargs)
-        except ArchiveError as e:
-            log.error(f'Nothing downloaded: {e}')
-            sys.exit(2)
+    except (ArchiveError, OSError, ValueError) as e:
+        log.error(str(e) if isinstance(e, ArchiveError) and 'downloaded' in str(e) else f'Nothing downloaded: {e}')
+        sys.exit(2)
     if combdf.attrs.get('incomplete'):
         sys.exit(1)
     return

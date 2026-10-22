@@ -2,6 +2,7 @@
 Tests for gaiaxpy_batch. The archive (astroquery) and GaiaXPy are mocked out except for the tests marked network,
 which are deselected by default (run them with pytest -m network).
 """
+import logging
 import os
 import time
 from types import SimpleNamespace
@@ -26,12 +27,13 @@ DEFAULT_WAVE = np.arange(336., 1021., 2.)  # gaiaxpy.calibrate default sampling
 class FakeServer:
     """Stands in for the Gaia archive, counting logins and requests"""
 
-    def __init__(self, maxids=None, transient=0, down_after=None, login_ok=True, expire=0):
+    def __init__(self, maxids=None, transient=0, down_after=None, login_ok=True, expire=0, litter=False):
         self.maxids = maxids  # request size limit
         self.transient = transient  # number of requests that fail with a server error before working
         self.down_after = down_after  # successful requests before the archive goes down
         self.login_ok = login_ok
         self.expire = expire  # number of requests that fail with HTTP 401 (expired session)
+        self.litter = litter  # leave a temp_ directory in the working directory, as astroquery does when killed
         self.logins = 0
         self.calls = []
         self.successes = 0
@@ -41,6 +43,8 @@ class FakeServer:
 
     def load(self, ids):
         self.calls.append(list(ids))
+        if self.litter:
+            os.mkdir(f'temp_{len(self.calls)}')
         if self.down_after is not None and self.successes >= self.down_after:
             raise OSError('Error 503:\nService Unavailable')
         if self.maxids is not None and len(ids) > self.maxids:
@@ -102,7 +106,9 @@ class FakeGaiaXPy:
 
     def convert(self, coeffs, sampling=None, **kwargs):
         ids = self._check(coeffs)
-        rows = [{'source_id': xid, 'xp': xp, 'flux': sampling.copy(), 'flux_error': np.ones_like(sampling)}
+        rows = [{'source_id': xid, 'xp': xp,
+                 'flux': None if xp == 'BP' and 700 <= xid < 710 else sampling.copy(),  # 700-709 have only RP
+                 'flux_error': None if xp == 'BP' and 700 <= xid < 710 else np.ones_like(sampling)}
                 for xid in ids for xp in ('BP', 'RP')]
         return pd.DataFrame(rows), sampling
 
@@ -368,3 +374,170 @@ def test_live_archive(tmp_path):
     combdf = gb.batch(fname, outputstyle='fits', anonymous=True)
     assert combdf.flux.notna().sum() == 2 and combdf.attrs['incomplete'] == 0
     assert len(os.listdir(tmp_path / 'outputspectra')) == 2
+
+
+BIG = 6917528443525529728  # a 19 digit source ID, which a float64 cannot hold exactly
+
+
+def test_read_ids():
+    values = pd.Series([str(BIG), None, 'Gaia DR3 138877256416618112', 'gaia dr3 5', 'abc', '1.3887e+17', ' 42 ',
+                        '99999999999999999999'])
+    ids = gb.read_ids(values)
+    assert ids.iloc[0] == BIG and ids.iloc[2] == 138877256416618112 and ids.iloc[3] == 5 and ids.iloc[6] == 42
+    assert ids[[1, 4, 5, 7]].isna().all()
+
+
+def test_batch_blank_and_prefixed_ids(archive, tmp_path):
+    fname = tmp_path / 'ids.csv'
+    fname.write_text(f'source_id,name\n{BIG},a\n,b\nGaia DR3 1001,c\nabc,d\n')
+    combdf = gb.batch(str(fname), anonymous=True)
+    assert sorted(set(sum(archive.calls, []))) == [1001, BIG]  # the 19 digit ID survived a blank row exactly
+    assert combdf.source_id.tolist()[0] == BIG and combdf.flux.notna().sum() == 2
+    failedcsv = pd.read_csv(tmp_path / 'ids_XP_spectra_failed.csv', keep_default_na=False)
+    assert sorted(failedcsv.source_id.astype(str)) == ['', 'abc'] and set(failedcsv.reason) == {gb.INVALID_ID}
+    assert combdf.attrs['incomplete'] == 0
+
+
+def test_output_names():
+    assert gb.output_names('a/data.csv.d/ids.CSV') == ('a/data.csv.d/ids_XP_spectra.csv',
+                                                       'a/data.csv.d/ids_XP_spectra_cut.csv',
+                                                       'a/data.csv.d/ids_XP_spectra_failed.csv')
+
+
+def test_validate_inputs_before_download(archive, tmp_path):
+    fname = tmp_path / 'ids.csv'
+    fname.write_text('gaia_id,name\n1,a\n')
+    with pytest.raises(FileNotFoundError):
+        gb.batch(str(tmp_path / 'missing.csv'), anonymous=True)
+    txt = tmp_path / 'ids.txt'
+    txt.write_text('source_id\n1\n')
+    with pytest.raises(ValueError, match='must be a csv'):
+        gb.batch(str(txt), anonymous=True)
+    with pytest.raises(ValueError, match="'source_id' not found.*-i"):
+        gb.batch(str(fname), anonymous=True)
+    with pytest.raises(ValueError, match="'shortname' not found.*-n"):
+        gb.batch(str(fname), idcolname='gaia_id', namecol='shortname', anonymous=True)
+    with pytest.raises(ValueError, match='fits or txt'):
+        gb.batch(str(fname), idcolname='gaia_id', outputstyle='png', anonymous=True)
+    with pytest.raises(ValueError, match='no points'):
+        gb.batch(str(fname), idcolname='gaia_id', sampling=gb.parse_sampling('arange', 900, 600, 2), anonymous=True)
+    assert archive.calls == []  # nothing was downloaded for any of these
+    nocsv = tmp_path / 'blank.csv'
+    nocsv.write_text('source_id\nabc\n')
+    with pytest.raises(ValueError, match='No valid Gaia DR3 source IDs'):
+        gb.batch(str(nocsv), anonymous=True)
+
+
+@pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='needs file permissions')
+def test_validate_read_only_output(tmp_path):
+    fname = tmp_path / 'ids.csv'
+    fname.write_text('source_id\n1\n')
+    tmp_path.chmod(0o500)
+    try:
+        with pytest.raises(PermissionError, match='Cannot write'):
+            gb.validate_inputs(str(fname))
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_x_without_u_warns(archive, tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(gb.log, 'propagate', True)
+    fname = tmp_path / 'ids.csv'
+    fname.write_text('source_id\n1\n')
+    gb.batch(str(fname), xp='BP', anonymous=True)
+    assert 'only applies to uncalibrated' in caplog.text
+
+
+def test_object_names():
+    ids = pd.Series([1, 2, 3, 4, 5, 6])
+    names = pd.Series(['a/b c', None, 'dup', 'dup', ' ', '../x'])
+    assert gb.object_names(ids, names) == ['a_b_c', 'GaiaDR3_2', 'dup_3', 'dup_4', 'GaiaDR3_5', 'x']
+    assert gb.object_names(ids) == [f'GaiaDR3_{i}' for i in range(1, 7)]
+
+
+def test_batch_unsafe_and_duplicate_names(archive, tmp_path):
+    fname = tmp_path / 'ids.csv'
+    fname.write_text('source_id,name\n1,a/b\n2,\n3,dup\n4,dup\n1,a/b\n')
+    gb.batch(str(fname), namecol='name', outputstyle='fits', anonymous=True)
+    files = sorted(os.listdir(tmp_path / 'outputspectra'))
+    assert files == ['GaiaDR3_2.fits', 'a_b.fits', 'dup_3.fits', 'dup_4.fits']  # source 1 listed twice, saved once
+    assert fits.getheader(str(tmp_path / 'outputspectra' / 'a_b.fits'), 1)['OBJECT'] == 'a/b'
+
+
+def test_temp_dirs_kept_out_of_cwd(monkeypatch, tmp_path):
+    install(monkeypatch, FakeServer(litter=True))
+    monkeypatch.chdir(tmp_path)
+    gb.download_xp([1, 2, 3], chunksize=1)
+    assert os.getcwd() == str(tmp_path) and not [d for d in os.listdir(tmp_path) if d.startswith('temp_')]
+
+
+@pytest.mark.skipif(os.name != 'posix' or os.geteuid() == 0, reason='needs file permissions')
+def test_read_only_cwd(monkeypatch, tmp_path):
+    install(monkeypatch, FakeServer(litter=True))
+    readonly = tmp_path / 'readonly'
+    readonly.mkdir()
+    monkeypatch.chdir(readonly)
+    readonly.chmod(0o500)
+    try:
+        stackdf, wave, failed = gb.download_xp([1, 2], chunksize=1)
+    finally:
+        readonly.chmod(0o700)
+    assert failed == {} and len(stackdf) == 2
+
+
+def test_missing_band(archive):
+    stackdf, wave, failed = gb.download_xp([1, 700], uncalibrated=True, xp='BP')
+    assert failed == {700: 'no BP spectrum'} and stackdf.source_id.tolist() == [1]
+    stackdf, wave, failed = gb.download_xp([1, 700], uncalibrated=True, xp='RP')
+    assert failed == {} and len(stackdf) == 2
+
+
+def test_credentials(monkeypatch):
+    assert gb.get_credentials(anonymous=True) == (None, None)
+    monkeypatch.setenv('GAIA_USERNAME', 'envuser')
+    monkeypatch.setenv('GAIA_PASSWORD', 'envpw')
+    assert gb.get_credentials() == ('envuser', 'envpw')
+    assert gb.get_credentials('me', 'pw') == ('me', 'pw')
+    monkeypatch.delenv('GAIA_USERNAME')
+    monkeypatch.delenv('GAIA_PASSWORD')
+    monkeypatch.setattr('builtins.input', lambda prompt: 'typed')
+    monkeypatch.setattr(gb, 'getpass', lambda prompt: 'secret')
+    assert gb.get_credentials() == ('typed', 'secret')
+
+    def no_terminal(prompt):
+        raise EOFError
+
+    monkeypatch.setattr('builtins.input', no_terminal)
+    with pytest.raises(ValueError, match='GAIA_USERNAME'):
+        gb.get_credentials()
+
+
+def test_main_exit_codes(monkeypatch, tmp_path):
+    fname = tmp_path / 'ids.csv'
+    pd.DataFrame({'source_id': list(range(1, 7))}).to_csv(fname, index=False)
+    install(monkeypatch)
+    assert gb.main(['-a', '-f', str(fname), '-o', 'txt']) is None  # status 0
+    assert len(os.listdir(tmp_path / 'outputspectra')) == 6
+    install(monkeypatch, FakeServer(down_after=2))
+    with pytest.raises(SystemExit) as exit_info:
+        gb.main(['-a', '-f', str(fname), '-c', '1', '-w', '1', '--retries', '0'])
+    assert exit_info.value.code == 1
+    install(monkeypatch, FakeServer(down_after=0))
+    with pytest.raises(SystemExit) as exit_info:
+        gb.main(['-a', '-f', str(fname), '-c', '1', '-w', '1', '--retries', '0'])
+    assert exit_info.value.code == 2
+    with pytest.raises(SystemExit) as exit_info:
+        gb.main(['-a', '-f', str(fname), '-i', 'gaia_id'])
+    assert exit_info.value.code == 2
+    monkeypatch.setenv('GAIA_USERNAME', 'me')
+    monkeypatch.setenv('GAIA_PASSWORD', 'pw')
+    server, _ = install(monkeypatch)
+    assert gb.main(['-f', str(fname), '-v']) is None and server.logins >= 1
+
+
+def test_console_formatter():
+    formatter = gb.ConsoleFormatter()
+    record = logging.LogRecord('gaiaxpy_batch', logging.INFO, __file__, 1, 'done %d', (3,), None)
+    assert formatter.format(record) == 'done 3'
+    record.levelno, record.levelname = logging.WARNING, 'WARNING'
+    assert formatter.format(record) == 'WARNING: done 3'
