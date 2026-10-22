@@ -1,0 +1,7 @@
+-- An example query for the Gaia archive (https://gea.esac.esa.int/archive/, "Search" then "Advanced (ADQL)"):
+-- sources within 20 pc (parallax above 50 mas) that have XP spectra.
+-- Download the result as csv and give it to gaiaxpy-batch with -f.
+SELECT source_id, ra, dec, parallax, phot_g_mean_mag
+FROM gaiadr3.gaia_source
+WHERE has_xp_continuous = 'True'
+  AND parallax > 50
