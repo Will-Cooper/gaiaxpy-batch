@@ -3,6 +3,7 @@ Tests for gaiaxpy_batch. The archive (astroquery) and GaiaXPy are mocked out exc
 which are deselected by default (run them with pytest -m network).
 """
 import os
+import time
 from types import SimpleNamespace
 from zipfile import BadZipFile
 
@@ -155,6 +156,14 @@ def test_is_transient():
     assert gb.http_status(OSError('Error 401:\nUnauthorized')) == 401
 
 
+def test_short_html():
+    page = ('Error 401:\n<!doctype html><html lang="en"><head><title>HTTP Status 401 – Unauthorized</title></head>'
+            '<body><h1>HTTP Status 401 – Unauthorized</h1><p><b>Type</b> Status Report</p>'
+            '<p><b>Message</b> Credentials expiration</p></body></html>')
+    assert gb._short(OSError(page)) == 'OSError: HTTP Status 401 – Unauthorized: Credentials expiration'
+    assert gb._short(BadZipFile('File is not a zip file')) == 'BadZipFile: File is not a zip file'
+
+
 def test_bad_request_bisection(archive):
     ids = list(range(1, 26)) + [BAD]
     stackdf, wave, failed = gb.download_xp(ids, chunksize=10, workers=2)
@@ -227,8 +236,10 @@ def test_login_failure_stops(monkeypatch):
 
 def test_expired_session_logs_in_again(monkeypatch):
     server, _ = install(monkeypatch, FakeServer(expire=1))
-    stackdf, wave, failed = gb.download_xp([1, 2], username='me', password='pw')
+    start = time.monotonic()
+    stackdf, wave, failed = gb.download_xp([1, 2], username='me', password='pw', retry_delay=100)
     assert failed == {} and server.logins == 2
+    assert time.monotonic() - start < 10  # logged in again straight away, not after the 100 s retry delay
 
 
 def test_default_chunksize_and_workers(monkeypatch):

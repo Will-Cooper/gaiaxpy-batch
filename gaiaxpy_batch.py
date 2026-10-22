@@ -10,7 +10,7 @@ The spectra are saved to csv and (optionally) per-object fits/txt files.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
-from contextlib import nullcontext, redirect_stdout
+from contextlib import redirect_stdout
 from getpass import getpass
 from io import StringIO
 import logging
@@ -316,8 +316,13 @@ def is_transient(e: Exception) -> bool:
 
 
 def _short(e: Exception) -> str:
-    """The first line of an exception, for log messages"""
-    lines = [line for line in str(e).splitlines() if line.strip()]
+    """The first lines of an exception, for log messages, with HTML error pages reduced to their title and message"""
+    text = str(e)
+    if '<html' in text.lower():  # e.g. Tomcat's "HTTP Status 401 – Unauthorized ... Message Credentials expiration"
+        found = [re.search(pattern, text, re.S | re.I) for pattern in (r'<title>(.*?)</title>',
+                                                                       r'<b>Message</b>\s*(.*?)</p>')]
+        text = ': '.join(match.group(1).strip() for match in found if match) or text.split('<')[0].strip()
+    lines = [line for line in text.splitlines() if line.strip()]
     return f'{type(e).__name__}: {" ".join(lines[:2])}'[:200]
 
 
@@ -412,9 +417,10 @@ class Archive:
                     raise  # handled by the caller
                 if attempt == self.retries:
                     raise ArchiveError(f'{what} failed {attempt + 1} times, lastly with {_short(e)}') from e
-                if http_status(e) in (401, 403):
-                    self._local.gaia = None  # the session has expired, log in again
                 wait = self.delay * 2 ** attempt
+                if http_status(e) in (401, 403):  # the session has expired (after about 30 min), log in again now
+                    self._local.gaia = None
+                    wait = 0.
                 log.warning(f'{what} failed ({_short(e)}), retrying in {wait:.0f} s ({attempt + 1}/{self.retries})')
                 self.stop.wait(wait)
 
@@ -810,8 +816,10 @@ def main(argv: Optional[List[str]] = None):
     kwargs['username'], kwargs['password'] = get_credentials(anonymous=args.anonymous)  # prompt before hiding stdout
     logging.basicConfig(format='%(levelname)s: %(message)s', level='INFO' if args.verbose else 'WARNING')
     astroquery_log.setLevel('INFO' if args.verbose else 'ERROR')
-    # GaiaXPy prints its own messages and progress bars to stdout, hide them unless verbose
-    with nullcontext() if args.verbose else redirect_stdout(StringIO()):
+    astroquery_log.propagate = False  # astroquery has its own handler, don't print its messages twice
+    # GaiaXPy and astroquery print messages, progress bars and raw HTTP error pages to stdout, which would garble
+    # the progress bar; everything useful is logged (to stderr) anyway
+    with redirect_stdout(StringIO()):
         try:
             combdf = batch(args.filename, **kwargs)
         except ArchiveError as e:
