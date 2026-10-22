@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaiaxpy-batch"
+version = "2.0.0"
+description = "Batch download of Gaia DR3 XP spectra through GaiaXPy, to csv, fits or txt files"
+readme = "README.md"
+license = "BSD-3-Clause"
+authors = [{ name = "W. J. Cooper" }]
+requires-python = ">=3.11"
+# Ranges for installing alongside other packages; requirements.txt has the exact versions tested.
+# Capped where the code relies on internals (gaiaxpy.core.server, astroquery's login state) or GaiaXPy would break
+# (it sets a pandas option removed in pandas 4)
+dependencies = [
+    "gaiaxpy>=2.1.5,<3",
+    "astropy>=5.3.3",
+    "astroquery>=0.4.11,<0.5",
+    "numpy>=1.24",
+    "pandas>=2.0,<4",
+    "tqdm>=4.66.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov", "ruff"]
+
+[project.scripts]
+gaiaxpy-batch = "gaiaxpy_batch:main"
+
+[project.urls]
+Homepage = "https://github.com/Will-Cooper/gaiaxpy-batch"
+
+[tool.setuptools]
+py-modules = ["gaiaxpy_batch"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]  # pycodestyle and pyflakes
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not network'"
+markers = ["network: queries the Gaia archive (deselect with -m 'not network', the default)"]

@@ -1,0 +1,66 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '17 6 * * 1'  # weekly, to catch new versions of the dependencies breaking the "latest" job
+
+jobs:
+  pinned:
+    # the exact versions in requirements-dev.txt, as environment.yml installs them
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install
+      run: |
+        python -m pip install -r requirements-dev.txt
+        python -m pip install --no-deps .
+
+    - name: Lint
+      run: ruff check .
+
+    - name: Test (offline, the archive is mocked)
+      run: python -m pytest --cov=gaiaxpy_batch --cov-report=term-missing --cov-fail-under=95
+
+    - name: Command line
+      run: |
+        gaiaxpy-batch --version
+        gaiaxpy-batch -h
+
+  latest:
+    # the newest versions allowed by pyproject.toml, on every supported Python
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ "ubuntu-latest" ]
+        python-version: [ "3.11", "3.12", "3.13", "3.14" ]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install
+      run: python -m pip install .[dev]
+
+    - name: Test (offline, the archive is mocked)
+      run: python -m pytest
+
+    - name: Command line
+      run: gaiaxpy-batch --version

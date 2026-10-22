@@ -129,3 +129,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# gaiaxpy-batch outputs
+outputspectra/
+*_XP_spectra*.csv
+temp_*/
+
+# Claude Code worktrees and settings
+.claude/
