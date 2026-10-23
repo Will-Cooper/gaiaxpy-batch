@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0 (unreleased)
+## 2.0.1 (2026-10-23)
 For GaiaXPy 2.1.5 and the Gaia archive's October 2026 request limits. Needs Python 3.11 or newer.
 
 ### Changed
