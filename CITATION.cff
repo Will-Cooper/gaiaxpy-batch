@@ -1,10 +1,27 @@
 cff-version: 1.2.0
-message: "If you use this software, please cite it as below."
-authors:
-- family-names: "Cooper"
-  given-names: "W. J."
-  orcid: "https://orcid.org/0000-0003-3501-8967"
+message: "If you use this software, please cite it as below, as well as GaiaXPy."
+type: software
 title: "gaiaxpy-batch"
-version: 2.0.0
-date-released: 2026-10-20
+abstract: >-
+  Batch download of Gaia DR3 BP/RP (XP) spectra for lists of source IDs of any length.
+  The XP continuous spectra are downloaded from the Gaia archive with astroquery, in chunks within the
+  archive's request limits, in parallel, with retries, and calibrated or converted with GaiaXPy.
+  The spectra are saved as csv tables and, optionally, one fits or txt file per object.
+authors:
+  - family-names: "Cooper"
+    given-names: "W. J."
+    orcid: "https://orcid.org/0000-0003-3501-8967"
+    affiliation: "University of Hertfordshire, Centre for Astrophysics Research"
+version: "2.0.1"
+date-released: "2026-10-23"
+license: BSD-3-Clause
+repository-code: "https://github.com/Will-Cooper/gaiaxpy-batch"
 url: "https://github.com/Will-Cooper/gaiaxpy-batch"
+keywords:
+  - Gaia
+  - Gaia DR3
+  - XP spectra
+  - BP/RP spectra
+  - GaiaXPy
+  - astronomy
+  - spectroscopy
