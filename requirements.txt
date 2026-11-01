@@ -16,7 +16,7 @@ cryptography==50.0.2
 cycler==0.12.1
 docopt==0.6.2
 fastavro==1.13.1
-fonttools==4.67.0
+fonttools==4.68.0
 GaiaXPy==2.1.5
 hdfs==2.7.3
 html5lib==1.1
