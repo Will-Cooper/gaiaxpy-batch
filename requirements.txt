@@ -46,6 +46,6 @@ six==1.17.0
 soupsieve==3.0.4
 tqdm==4.70.1
 typing_extensions==4.16.0
-tzdata==2026.5
+tzdata==2026.6
 urllib3==2.8.0
 webencodings==0.6.1
