@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.2 (unreleased)
+## 2.0.2 (2026-11-13)
 ### Fixed
 - `--version` reported 2.0.0 on the 2.0.1 release: the version now has one source, `gaiaxpy_batch.__version__`.
 - `-c`/`-w` below 1, negative `--retries`/`--retry-delay` and a `--timeout` of 0 or less are errors, rather than

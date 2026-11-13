@@ -153,6 +153,8 @@ def test_version_single_source():
         project = tomllib.load(f)
     assert 'version' not in project['project'] and 'version' in project['project']['dynamic']
     assert project['tool']['setuptools']['dynamic']['version'] == {'attr': 'gaiaxpy_batch.__version__'}
+    with open(os.path.join(os.path.dirname(gb.__file__), 'CITATION.cff')) as f:  # Zenodo reads this one
+        assert f'version: "{gb.__version__}"' in f.read()
 
 
 def test_get_sampling():
