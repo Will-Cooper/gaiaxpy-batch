@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.2 (unreleased)
+### Fixed
+- `--version` reported 2.0.0 on the 2.0.1 release: the version now has one source, `gaiaxpy_batch.__version__`.
+- `-c`/`-w` below 1, negative `--retries`/`--retry-delay` and a `--timeout` of 0 or less are errors, rather than
+  silently changed.
+
+### Changed
+- Shorter docstrings and README "How it works"; simpler argument parsing and `str2float`.
+- stdout is hidden only while downloading, so the credential prompt no longer needs checking twice.
+
 ## 2.0.1 (2026-10-23)
 For GaiaXPy 2.1.5 and the Gaia archive's October 2026 request limits. Needs Python 3.11 or newer.
 

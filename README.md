@@ -49,7 +49,7 @@ Type the commands into a terminal (on Windows, the "Miniforge Prompt" installed 
    ```bash
    gaiaxpy-batch --version
    ```
-   which prints something like `gaiaxpy-batch 2.0.0 (GaiaXPy 2.1.5)`.
+   which prints the versions, e.g. `gaiaxpy-batch 2.0.2 (GaiaXPy 2.1.5)`.
 6. **Run the example**, five sources (one of which has no XP spectrum), without logging in:
    ```bash
    gaiaxpy-batch -a -f examples/example_ids.csv -n name -o fits
@@ -256,15 +256,8 @@ from gaiaxpy import calibrate
 df, sampling = calibrate([138877256416618112, 142522579844473600], save_file=False)
 ```
 This script downloads the XP spectra (as the coefficients of basis functions) itself with `astroquery`,
-exactly as GaiaXPy does, and hands them to GaiaXPy to calibrate or convert, so the spectra are GaiaXPy's own. It:
-* splits the list into requests (50 anonymously, 1000 logged in, smaller if needed to keep every worker busy) and
-  sends several at once, each worker logging in once (again when the archive ends the login),
-* retries requests the archive fails with increasing waits, and stops if the archive seems to be down,
-* splits a request in half when the archive rejects it as too large or as a bad request,
-* splits spectra that fail to calibrate in half and calibrates each half again, without downloading them again,
-* saves everything it could get, lists the rest and why, and saves what has finished when stopped with Ctrl-C,
-* checks the input before asking for a password or downloading anything,
-* converts your wavelength grid to the pseudo-wavelengths uncalibrated spectra need.
+exactly as GaiaXPy does, in parallel requests within the archive's limits, with the retries described in
+[Troubleshooting](#troubleshooting), and hands them to GaiaXPy to calibrate or convert, so the spectra are GaiaXPy's own.
 
 For millions of sources, downloading the archive's
 [bulk XP files](https://cdn.gea.esac.esa.int/Gaia/gdr3/Spectroscopy/xp_continuous_mean_spectrum/)
