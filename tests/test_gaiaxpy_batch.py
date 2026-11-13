@@ -266,7 +266,15 @@ def test_default_chunksize_and_workers(monkeypatch):
 
 
 def test_interrupt_keeps_finished(monkeypatch):
-    install(monkeypatch)
+    server, _ = install(monkeypatch)
+    load = server.load
+
+    def slow_after_first(ids):  # otherwise one worker can finish all 20 chunks before the interrupt
+        if server.calls:
+            time.sleep(0.2)
+        return load(ids)
+
+    server.load = slow_after_first
     real = gb.as_completed
 
     def interrupted(futures):  # Ctrl-C after the first chunk is collected
