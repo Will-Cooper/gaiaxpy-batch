@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gaiaxpy-batch"
-version = "2.0.0"
+dynamic = ["version"]  # gaiaxpy_batch.__version__
 description = "Batch download of Gaia DR3 XP spectra through GaiaXPy, to csv, fits or txt files"
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -30,6 +30,9 @@ gaiaxpy-batch = "gaiaxpy_batch:main"
 
 [project.urls]
 Homepage = "https://github.com/Will-Cooper/gaiaxpy-batch"
+
+[tool.setuptools.dynamic]
+version = { attr = "gaiaxpy_batch.__version__" }
 
 [tool.setuptools]
 py-modules = ["gaiaxpy_batch"]

@@ -140,6 +140,21 @@ def test_sysargs():
     args = gb.sysargs(['-f', 'a.csv', '-s', 'linspace', '600', '1000', '50', '-x', 'bp', '-u', '--retries', '5'])
     assert len(args.sampling) == 50 and args.xp == 'BP' and args.namecol is None
     assert args.chunksize is None and args.retries == 5 and args.retry_delay == gb.RETRY_DELAY
+    for bad in (['-c', '0'], ['-w', '0'], ['--retries', '-1'], ['--retry-delay', '-1'], ['--timeout', '0']):
+        with pytest.raises(SystemExit):
+            gb.sysargs(['-f', 'a.csv'] + bad)
+    with pytest.raises(ValueError, match='negative'):
+        gb.Archive(retries=-1)
+
+
+def test_version_single_source():
+    import tomllib
+    with open(os.path.join(os.path.dirname(gb.__file__), 'pyproject.toml'), 'rb') as f:
+        project = tomllib.load(f)
+    assert 'version' not in project['project'] and 'version' in project['project']['dynamic']
+    assert project['tool']['setuptools']['dynamic']['version'] == {'attr': 'gaiaxpy_batch.__version__'}
+    with open(os.path.join(os.path.dirname(gb.__file__), 'CITATION.cff')) as f:  # Zenodo reads this one
+        assert f'version: "{gb.__version__}"' in f.read()
 
 
 def test_get_sampling():
